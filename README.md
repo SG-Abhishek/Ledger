@@ -1,32 +1,26 @@
 # Ledger — Personal balances
 
-A private, installable ledger for tracking transfers between you and other people. The app is a progressive web app (PWA), so you can add it to your Android home screen from Chrome. Entries stay in browser storage on that device; there is no bank connection or account.
+A private, installable ledger for tracking transfers between you and other people.
+
+## Features
+
+- They-owe-you / you-owe-them transfers with partial repayments
+- Per-person net balance, aliases, and merge duplicates
+- Shareable statements (worded for the other person)
+- Settle all with a person + undo
+- Optional due / remind dates
+- Light / Dark / System themes
+- Simple insights card
+- Encrypted local storage (PIN + optional biometric gate)
+- CSV export and encrypted JSON backup
+- Works offline as a PWA
 
 ## Use on Android
 
-1. Put this folder on a static web host that serves HTTPS, or run it from a local development server on your computer and open the address from your phone on the same network.
-2. Open the app in Chrome on Android.
-3. Open Chrome’s menu and choose **Install app** or **Add to Home screen**.
-4. Add transfers with the person, direction, amount, transfer date, and an optional note.
+1. Host the folder over HTTPS (or open via a local server).
+2. Open in Chrome → menu → **Install app** / **Add to Home screen**.
+3. Set a 4-digit PIN when prompted.
 
-The app shell works offline after the first load. For a personal ledger, make periodic backups from the up-arrow button and keep the downloaded JSON file somewhere safe. Restoring a backup replaces the ledger currently on that device.
+Data never leaves your device. Keep encrypted backups.
 
-## Included
-
-- Separate “they owe you” and “you owe them” transfers, with editable person, amount, direction, date, and note.
-- Per-person net balance, overall net metering, separate gross totals in each direction, and a transfer history.
-- Partial repayments with dates and notes, plus actions to settle a remainder or undo a repayment.
-- Shareable per-person statements through Android's share menu, with date range and settled-transfer options.
-- On-device typo suggestions plus saved aliases. Suggestions are never merged automatically; people can also be merged manually. Changing a transfer's name moves that transfer to a separate person.
-- Search, direction filters, sorting, rupee-only display, and CSV export.
-- A 4 digit PIN that encrypts the local ledger using AES-GCM and PBKDF2. The app locks when you request it and after it has been in the background for two minutes.
-- Encrypted JSON backups. Choose the same PIN when exporting and restoring; the app does not store it.
-
-If you set a longer PIN before this update, unlock with that PIN once; the app will then prompt you to change it to 4 digits.
-
-## Privacy and limitations
-
-The encrypted ledger is stored in this browser’s local storage. Clearing the browser’s site data or removing the app data can erase it, so keep encrypted backups. The app does not sync across devices, connect to banks, or use an online AI service. Name matching is a local spelling-similarity helper, not an AI model. A 4 digit PIN is easier to guess than a longer password; choose one you do not use elsewhere and keep an encrypted backup.
-
-All amounts are in Indian rupees.
-
+All amounts are in Indian rupees (₹).
