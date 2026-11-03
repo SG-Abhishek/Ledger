@@ -1,12 +1,16 @@
 {
-  "name": "Ledger — Personal balances",
+  "name": "Ledger — Personal Balances",
   "short_name": "Ledger",
-  "description": "A private personal ledger for money you owe and money owed to you.",
-  "start_url": "./",
-  "scope": "./",
+  "start_url": "./index.html",
   "display": "standalone",
-  "background_color": "#f7f8f9",
-  "theme_color": "#101b2b",
-  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+  "background_color": "#0c1420",
+  "theme_color": "#f7f8f9",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
 }
-

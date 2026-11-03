@@ -4,80 +4,362 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <meta name="theme-color" content="#f7f8f9" />
-  <meta name="description" content="A private personal ledger for money you owe and money owed to you." />
+  <meta name="description" content="A private, encrypted personal ledger for tracking money owed and borrowed." />
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" href="icon.svg" type="image/svg+xml" />
   <link rel="stylesheet" href="styles.css" />
-  <title>Ledger — Personal balances</title>
+  <title>Ledger — Personal Balances</title>
 </head>
 <body>
   <div class="app-shell">
     <header class="topbar">
-      <a class="brand" href="#" aria-label="Ledger home"><span class="brand-mark">L</span><span>ledger<span class="brand-dot">.</span></span></a>
+      <a class="brand" href="#" aria-label="Ledger home">
+        <span class="brand-mark">L</span>
+        <span>ledger<span class="brand-dot">.</span></span>
+      </a>
       <div class="top-actions">
-        <button class="icon-button" id="backupButton" title="Backup and restore" aria-label="Backup and restore">↥</button>
+        <button class="icon-button" id="backupButton" title="Backup & Restore" aria-label="Backup & Restore">↥</button>
         <button class="avatar" id="settingsButton" title="Settings" aria-label="Settings">☺</button>
       </div>
     </header>
 
     <main>
       <section class="welcome-row">
-        <div><p class="eyebrow" id="todayLabel">PERSONAL LEDGER</p><h1>Your money,<br class="mobile-break" /> in good order.</h1><p class="subhead">What’s owed — both ways — in one calm place.</p></div>
+        <div>
+          <p class="eyebrow" id="todayLabel">PERSONAL LEDGER</p>
+          <h1>Your money,<br class="mobile-break" /> in good order.</h1>
+          <p class="subhead">What’s owed — both ways — in one calm, private place.</p>
+        </div>
         <button class="primary-button desktop-add" id="addButton"><span>＋</span> Add a transfer</button>
       </section>
 
       <section class="balance-grid" aria-label="Balance overview">
-        <article class="balance-card balance-net"><div class="card-label"><span class="label-icon">◈</span> NET BALANCE <span class="info-dot" title="What you're owed minus what you owe">i</span></div><div class="balance-amount" id="netBalance">₹0</div><div class="balance-foot"><span id="netCaption">All settled up</span><span class="sparkline">⌁</span></div></article>
-        <article class="balance-card"><div class="card-label"><span class="label-icon green">↙</span> OWED TO YOU</div><div class="balance-amount" id="owedToYou">₹0</div><div class="balance-foot"><span>Across <b id="toYouCount">0</b> people</span><span class="mini-arrow">↗</span></div></article>
-        <article class="balance-card"><div class="card-label"><span class="label-icon coral">↗</span> YOU OWE</div><div class="balance-amount" id="youOwe">₹0</div><div class="balance-foot"><span>Across <b id="oweCount">0</b> people</span><span class="mini-arrow">↗</span></div></article>
+        <article class="balance-card balance-net">
+          <div class="card-label">
+            <span class="label-icon">◈</span> NET BALANCE
+            <span class="info-dot" title="What you are owed minus what you owe">i</span>
+          </div>
+          <div class="balance-amount" id="netBalance">₹0.00</div>
+          <div class="balance-foot">
+            <span id="netCaption">All settled up</span>
+            <span class="sparkline">⌁</span>
+          </div>
+        </article>
+        <article class="balance-card">
+          <div class="card-label"><span class="label-icon green">↙</span> OWED TO YOU</div>
+          <div class="balance-amount" id="owedToYou">₹0.00</div>
+          <div class="balance-foot"><span>Across <b id="toYouCount">0</b> people</span><span class="mini-arrow">↗</span></div>
+        </article>
+        <article class="balance-card">
+          <div class="card-label"><span class="label-icon coral">↗</span> YOU OWE</div>
+          <div class="balance-amount" id="youOwe">₹0.00</div>
+          <div class="balance-foot"><span>Across <b id="oweCount">0</b> people</span><span class="mini-arrow">↗</span></div>
+        </article>
       </section>
 
       <section id="analyticsCard" class="analytics-section" aria-label="Insights"></section>
 
-      <section class="section-head"><div><p class="eyebrow">YOUR PEOPLE</p><h2>Balances & activity</h2></div><button class="text-button" id="shareAllButton">Share overview <span>↗</span></button></section>
-      <section class="toolbar">
-        <label class="search"><span>⌕</span><input id="searchInput" placeholder="Search people or notes…" autocomplete="off" /></label>
-        <div class="filters" role="group" aria-label="Filter transfers"><button class="filter active" data-filter="all">All <span id="allCount">0</span></button><button class="filter" data-filter="owed">Owed to you</button><button class="filter" data-filter="owe">You owe</button></div>
-        <select id="sortSelect" aria-label="Sort people"><option value="recent">Most recent</option><option value="name">Name A–Z</option><option value="amount">Largest balance</option></select>
+      <section class="section-head">
+        <div>
+          <p class="eyebrow">YOUR PEOPLE</p>
+          <h2>Balances & activity</h2>
+        </div>
+        <button class="text-button" id="shareAllButton">Share overview <span>↗</span></button>
       </section>
+
+      <section class="toolbar">
+        <label class="search">
+          <span>⌕</span>
+          <input id="searchInput" placeholder="Search people or notes…" autocomplete="off" />
+        </label>
+        <div class="filters" role="group" aria-label="Filter transfers">
+          <button class="filter active" data-filter="all">All <span id="allCount">0</span></button>
+          <button class="filter" data-filter="owed">Owed to you</button>
+          <button class="filter" data-filter="owe">You owe</button>
+        </div>
+        <select id="sortSelect" aria-label="Sort people">
+          <option value="recent">Most recent</option>
+          <option value="name">Name A–Z</option>
+          <option value="amount">Largest balance</option>
+        </select>
+      </section>
+
       <section id="peopleList" class="people-list" aria-live="polite"></section>
-      <section class="privacy-note"><span>♧</span><p><b>Your ledger stays yours.</b> Your entries are saved only on this device. No bank connection, no account, no cloud sync.</p></section>
+
+      <section class="privacy-note">
+        <span>♧</span>
+        <p><b>Private by design.</b> Your records are encrypted with AES-GCM and stored only on this device. No external servers, no tracking, and no unencrypted caches.</p>
+      </section>
     </main>
+
     <button class="fab" id="fabButton" aria-label="Add a transfer">＋</button>
-    <footer>MADE FOR YOUR PEACE OF MIND <span>·</span> PRIVATE BY DESIGN</footer>
+    <footer>ENCRYPTED ON-DEVICE <span>·</span> PRIVATE BY DESIGN</footer>
   </div>
 
-  <dialog id="entryDialog" class="dialog"><form id="entryForm" method="dialog">
-    <div class="dialog-head"><div><p class="eyebrow" id="formEyebrow">NEW TRANSFER</p><h2 id="formTitle">Add a transfer</h2></div><button type="button" class="close-button" data-close="entryDialog" aria-label="Close">×</button></div>
-    <input type="hidden" id="entryId" />
-    <label class="field-label" for="personName">PERSON</label><input class="field" id="personName" required maxlength="60" placeholder="John Doe" autocomplete="name" /><small class="field-help">When editing, changing the name moves this transfer to a new person. Choose a suggested match to keep it grouped.</small>
-    <div id="matchHint" class="match-hint" hidden></div>
-    <label class="field-label">DIRECTION</label><div class="direction-picker"><label class="direction-option"><input type="radio" name="direction" value="toYou" checked /><span class="direction-box"><b>They owe you</b><small>Money you lent or paid for them</small></span></label><label class="direction-option"><input type="radio" name="direction" value="youOwe" /><span class="direction-box"><b>You owe them</b><small>Money they lent or paid for you</small></span></label></div>
-    <div class="field-row"><div class="field-wrap"><label class="field-label" for="amount">AMOUNT</label><div class="amount-input"><span>₹</span><input class="field" id="amount" type="number" min="0.01" step="0.01" required placeholder="0.00" inputmode="decimal" /></div></div><div class="field-wrap"><label class="field-label" for="transferDate">TRANSFER DATE</label><input class="field" id="transferDate" type="date" required /></div></div>
-    <div class="field-row"><div class="field-wrap"><label class="field-label" for="dueDate">REMIND / DUE DATE <span class="optional">OPTIONAL</span></label><div style="display:flex;gap:8px;align-items:center"><input class="field" id="dueDate" type="date" style="flex:1" /><button type="button" class="secondary-button" id="clearDueDate" style="padding:10px 12px;width:auto;flex-shrink:0" title="Clear due date">Clear</button></div><small class="field-help">Leave empty if you do not need a reminder</small></div></div>
-    <label class="field-label" for="note">NOTE <span class="optional">OPTIONAL</span></label><input class="field" id="note" maxlength="120" placeholder="What was this for?" />
-    <div class="form-bottom"><button type="button" class="delete-button" id="deleteEntry" hidden>Delete transfer</button><div class="spacer"></div><button type="button" class="secondary-button" data-close="entryDialog">Cancel</button><button type="submit" class="primary-button">Save transfer</button></div>
-  </form></dialog>
-  <dialog id="personDialog" class="dialog person-dialog"><div id="personDetail"></div></dialog>
-  <dialog id="settingsDialog" class="dialog"><div class="dialog-head"><div><p class="eyebrow">PREFERENCES</p><h2>Ledger settings</h2></div><button type="button" class="close-button" data-close="settingsDialog" aria-label="Close">×</button></div><div class="setting-row"><div><b>Currency</b><small>Indian rupees · ₹</small></div><span class="status-chip static-chip">INR</span></div>
-<div class="setting-row" style="flex-direction:column;align-items:stretch;gap:8px"><div><b>Theme</b><small>Appearance of the app</small></div>
-<div class="theme-options">
-  <button type="button" class="theme-chip" data-theme="light">Light</button>
-  <button type="button" class="theme-chip" data-theme="dark">Dark</button>
-  <button type="button" class="theme-chip" data-theme="system">System</button>
-</div></div>
-<p class="settings-copy">This ledger is set to rupees.</p>
-<div class="setting-row" id="biometricRow" style="display:none"><div><b>Biometric unlock</b><small>Fingerprint first, PIN if it fails</small></div><button type="button" class="secondary-button" id="enableBiometric" style="width:auto;padding:8px 12px">Enable</button></div>
-<div class="settings-actions"><button class="secondary-button" id="changePinButton">Change PIN</button><button class="secondary-button" id="lockNowButton">Lock now</button><button class="secondary-button" id="undoButton">Undo last action</button></div><div class="form-bottom"><div class="spacer"></div><button class="primary-button" id="saveSettings">Done</button></div></dialog>
-  <dialog id="backupDialog" class="dialog"><div class="dialog-head"><div><p class="eyebrow">YOUR DATA</p><h2>Backup & restore</h2></div><button type="button" class="close-button" data-close="backupDialog" aria-label="Close">×</button></div><p class="settings-copy">Backups are encrypted with your ledger PIN before download. Restore replaces the current ledger on this device.</p><div class="backup-actions"><button class="secondary-button" id="exportButton">Encrypted backup</button><label class="secondary-button import-label">Restore backup<input type="file" id="importFile" accept="application/json,.json" /></label></div><div class="backup-actions"><button class="secondary-button" id="csvButton">Export CSV</button></div><p class="settings-copy tiny">Keep the PIN safe: encrypted backups cannot be opened without it.</p></dialog>
-  <dialog id="lockDialog" class="dialog lock-dialog"><form id="lockForm"><div class="dialog-head"><div><p class="eyebrow" id="lockEyebrow">PRIVATE LEDGER</p><h2 id="lockTitle">Unlock your ledger</h2></div></div><p class="settings-copy" id="lockCopy">Enter your PIN to decrypt and open your ledger on this device.</p><label class="field-label" for="pinInput">PIN</label><input class="field pin-field" id="pinInput" type="password" inputmode="numeric" autocomplete="current-password" minlength="4" maxlength="4" pattern="[0-9]{4}" required placeholder="4 digits" /><div id="pinConfirmWrap" hidden><label class="field-label" for="pinConfirm">CONFIRM PIN</label><input class="field pin-field" id="pinConfirm" type="password" inputmode="numeric" autocomplete="new-password" minlength="4" maxlength="4" pattern="[0-9]{4}" placeholder="Enter the PIN again" /></div>
-    <button type="button" class="secondary-button" id="biometricButton" hidden style="width:100%;margin:12px 0 4px">Use fingerprint</button>
-    <p class="pin-error" id="pinError" aria-live="polite"></p><div class="form-bottom"><div class="spacer"></div><button class="primary-button" id="pinSubmit" type="submit">Unlock</button></div></form></dialog>
-  <dialog id="repaymentDialog" class="dialog"><form id="repaymentForm"><div class="dialog-head"><div><p class="eyebrow">REPAYMENT</p><h2>Record a repayment</h2></div><button type="button" class="close-button" data-close="repaymentDialog" aria-label="Close">×</button></div><input type="hidden" id="repaymentEntryId" /><p class="repay-context" id="repayContext"></p><label class="field-label" for="repaymentAmount">AMOUNT RECEIVED / PAID</label><div class="amount-input"><span>₹</span><input class="field" id="repaymentAmount" type="number" min="0.01" step="0.01" required inputmode="decimal" /></div><div class="field-row"><div class="field-wrap"><label class="field-label" for="repaymentDate">DATE</label><input class="field" id="repaymentDate" type="date" required /></div><div class="field-wrap"><label class="field-label" for="repaymentNote">NOTE</label><input class="field" id="repaymentNote" maxlength="100" placeholder="Optional" /></div></div><div class="form-bottom"><div class="spacer"></div><button type="button" class="secondary-button" data-close="repaymentDialog">Cancel</button><button type="submit" class="primary-button">Save repayment</button></div></form></dialog>
-  <dialog id="aliasDialog" class="dialog"><div class="dialog-head"><div><p class="eyebrow">PERSON NAMES</p><h2 id="aliasTitle">Name aliases</h2></div><button type="button" class="close-button" data-close="aliasDialog" aria-label="Close">×</button></div><p class="settings-copy">Save nicknames and common spellings so future entries match this person.</p><div id="aliasList" class="alias-list"></div><div class="alias-add"><input class="field" id="aliasInput" maxlength="60" placeholder="Add a nickname or spelling" /><button class="primary-button" id="addAliasButton">Add</button></div><div class="form-bottom"><div class="spacer"></div><button class="primary-button" data-close="aliasDialog">Done</button></div></dialog>
-  <dialog id="mergeDialog" class="dialog"><form id="mergeForm"><div class="dialog-head"><div><p class="eyebrow">COMBINE PEOPLE</p><h2>Merge duplicate person</h2></div><button type="button" class="close-button" data-close="mergeDialog" aria-label="Close">×</button></div><p class="settings-copy" id="mergeCopy"></p><label class="field-label" for="mergeSelect">MERGE INTO</label><select class="field" id="mergeSelect" required></select><div class="form-bottom"><div class="spacer"></div><button type="button" class="secondary-button" data-close="mergeDialog">Cancel</button><button type="submit" class="primary-button">Merge people</button></div></form></dialog>
-  <div class="toast" id="toast" role="status"></div>
+  <!-- Entry Dialog -->
+  <dialog id="entryDialog" class="dialog">
+    <form id="entryForm" method="dialog">
+      <div class="dialog-head">
+        <div><p class="eyebrow" id="formEyebrow">NEW TRANSFER</p><h2 id="formTitle">Add a transfer</h2></div>
+        <button type="button" class="close-button" data-close="entryDialog" aria-label="Close">×</button>
+      </div>
+      <input type="hidden" id="entryId" />
+      <label class="field-label" for="personName">PERSON</label>
+      <input class="field" id="personName" required maxlength="60" placeholder="e.g. Rahul Sharma" autocomplete="off" />
+      <div id="matchHint" class="match-hint" hidden></div>
+
+      <label class="field-label">DIRECTION</label>
+      <div class="direction-picker">
+        <label class="direction-option">
+          <input type="radio" name="direction" value="toYou" checked />
+          <span class="direction-box"><b>They owe you</b><small>Money you lent or paid for them</small></span>
+        </label>
+        <label class="direction-option">
+          <input type="radio" name="direction" value="youOwe" />
+          <span class="direction-box"><b>You owe them</b><small>Money they lent or paid for you</small></span>
+        </label>
+      </div>
+
+      <div class="field-row">
+        <div class="field-wrap">
+          <label class="field-label" for="amount">AMOUNT</label>
+          <div class="amount-input">
+            <span class="currency-prefix">₹</span>
+            <input class="field" id="amount" type="number" min="0.01" step="0.01" required placeholder="0.00" inputmode="decimal" />
+          </div>
+        </div>
+        <div class="field-wrap">
+          <label class="field-label" for="transferDate">TRANSFER DATE</label>
+          <input class="field" id="transferDate" type="date" required />
+        </div>
+      </div>
+
+      <div class="field-row">
+        <div class="field-wrap">
+          <label class="field-label" for="dueDate">DUE DATE <span class="optional">OPTIONAL</span></label>
+          <div class="input-action-row">
+            <input class="field" id="dueDate" type="date" />
+            <button type="button" class="secondary-button" id="clearDueDate" title="Clear due date">Clear</button>
+          </div>
+        </div>
+      </div>
+
+      <label class="field-label" for="note">NOTE <span class="optional">OPTIONAL</span></label>
+      <input class="field" id="note" maxlength="120" placeholder="e.g. Dinner share, concert tickets" />
+
+      <div class="form-bottom">
+        <button type="button" class="delete-button" id="deleteEntry" hidden>Delete transfer</button>
+        <div class="spacer"></div>
+        <button type="button" class="secondary-button" data-close="entryDialog">Cancel</button>
+        <button type="submit" class="primary-button">Save transfer</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Person Detail Dialog -->
+  <dialog id="personDialog" class="dialog person-dialog">
+    <div id="personDetail"></div>
+  </dialog>
+
+  <!-- Settings Dialog -->
+  <dialog id="settingsDialog" class="dialog">
+    <div class="dialog-head">
+      <div><p class="eyebrow">PREFERENCES</p><h2>Ledger settings</h2></div>
+      <button type="button" class="close-button" data-close="settingsDialog" aria-label="Close">×</button>
+    </div>
+
+    <div class="setting-row">
+      <div><b>Currency</b><small>Display currency and formatting</small></div>
+      <select id="currencySelect" class="field inline-select">
+        <option value="INR">INR (₹)</option>
+        <option value="USD">USD ($)</option>
+        <option value="EUR">EUR (€)</option>
+        <option value="GBP">GBP (£)</option>
+        <option value="AED">AED (د.إ)</option>
+      </select>
+    </div>
+
+    <div class="setting-row theme-setting-row">
+      <div><b>Theme</b><small>Appearance of the interface</small></div>
+      <div class="theme-options">
+        <button type="button" class="theme-chip" data-theme="light">Light</button>
+        <button type="button" class="theme-chip" data-theme="dark">Dark</button>
+        <button type="button" class="theme-chip" data-theme="system">System</button>
+      </div>
+    </div>
+
+    <div class="setting-row" id="biometricRow" style="display:none">
+      <div>
+        <b>Hardware Biometrics</b>
+        <small id="bioStatusCopy">Unlock with fingerprint/face via WebAuthn PRF</small>
+      </div>
+      <button type="button" class="secondary-button" id="enableBiometric">Enable</button>
+    </div>
+
+    <div class="settings-actions">
+      <button class="secondary-button" id="changePinButton">Change PIN</button>
+      <button class="secondary-button" id="lockNowButton">Lock now</button>
+      <button class="secondary-button" id="undoButton">Undo last action</button>
+    </div>
+
+    <div class="form-bottom">
+      <div class="spacer"></div>
+      <button class="primary-button" id="saveSettings">Done</button>
+    </div>
+  </dialog>
+
+  <!-- Backup & Restore Dialog -->
+  <dialog id="backupDialog" class="dialog">
+    <div class="dialog-head">
+      <div><p class="eyebrow">YOUR DATA</p><h2>Backup & restore</h2></div>
+      <button type="button" class="close-button" data-close="backupDialog" aria-label="Close">×</button>
+    </div>
+    <p class="settings-copy">Backups are encrypted using AES-256-GCM with your chosen PIN before download. Restoring replaces or merges into your current vault.</p>
+    <div class="backup-actions">
+      <button class="secondary-button" id="exportButton">Encrypted backup</button>
+      <label class="secondary-button import-label">
+        Restore backup
+        <input type="file" id="importFile" accept="application/json,.json" />
+      </label>
+    </div>
+    <div class="backup-actions">
+      <button class="secondary-button" id="csvButton">Export CSV</button>
+    </div>
+    <p class="settings-copy tiny">Keep your backup PIN safe: an encrypted backup cannot be restored without it.</p>
+  </dialog>
+
+  <!-- Lock / PIN Dialog -->
+  <dialog id="lockDialog" class="dialog lock-dialog">
+    <form id="lockForm">
+      <div class="dialog-head">
+        <div><p class="eyebrow" id="lockEyebrow">PRIVATE LEDGER</p><h2 id="lockTitle">Unlock your ledger</h2></div>
+      </div>
+      <p class="settings-copy" id="lockCopy">Enter your PIN to decrypt your balances.</p>
+      
+      <label class="field-label" for="pinInput">PIN</label>
+      <input class="field pin-field" id="pinInput" type="password" inputmode="numeric" autocomplete="current-password" minlength="4" maxlength="6" pattern="[0-9]{4,6}" required placeholder="••••" />
+      
+      <div id="pinConfirmWrap" hidden>
+        <label class="field-label" for="pinConfirm">CONFIRM PIN</label>
+        <input class="field pin-field" id="pinConfirm" type="password" inputmode="numeric" autocomplete="new-password" minlength="4" maxlength="6" pattern="[0-9]{4,6}" placeholder="••••" />
+      </div>
+
+      <button type="button" class="secondary-button" id="biometricButton" hidden>Use biometric unlock</button>
+      <p class="pin-error" id="pinError" aria-live="polite"></p>
+      
+      <div class="form-bottom">
+        <div class="spacer"></div>
+        <button class="primary-button" id="pinSubmit" type="submit">Unlock</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Modal for Backup PIN (replaces window.prompt) -->
+  <dialog id="backupPinDialog" class="dialog lock-dialog">
+    <form id="backupPinForm">
+      <div class="dialog-head">
+        <div><p class="eyebrow">ENCRYPT BACKUP</p><h2 id="backupPinTitle">Set Backup PIN</h2></div>
+        <button type="button" class="close-button" data-close="backupPinDialog" aria-label="Close">×</button>
+      </div>
+      <p class="settings-copy" id="backupPinCopy">Enter a 4 to 6 digit PIN to protect this file.</p>
+      <label class="field-label" for="backupPinInput">BACKUP PIN</label>
+      <input class="field pin-field" id="backupPinInput" type="password" inputmode="numeric" pattern="[0-9]{4,6}" required placeholder="••••" />
+      <p class="pin-error" id="backupPinError" aria-live="polite"></p>
+      <div class="form-bottom">
+        <button type="button" class="secondary-button" data-close="backupPinDialog">Cancel</button>
+        <div class="spacer"></div>
+        <button class="primary-button" type="submit" id="backupPinSubmit">Continue</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Generic Confirmation Dialog (replaces window.confirm) -->
+  <dialog id="confirmDialog" class="dialog lock-dialog">
+    <div class="dialog-head">
+      <div><p class="eyebrow">CONFIRMATION</p><h2 id="confirmTitle">Are you sure?</h2></div>
+    </div>
+    <p class="settings-copy" id="confirmCopy">This action cannot be undone.</p>
+    <div class="form-bottom">
+      <button type="button" class="secondary-button" id="confirmNo">Cancel</button>
+      <div class="spacer"></div>
+      <button type="button" class="delete-button-solid" id="confirmYes">Confirm</button>
+    </div>
+  </dialog>
+
+  <!-- Repayment Dialog -->
+  <dialog id="repaymentDialog" class="dialog">
+    <form id="repaymentForm">
+      <div class="dialog-head">
+        <div><p class="eyebrow">REPAYMENT</p><h2>Record a repayment</h2></div>
+        <button type="button" class="close-button" data-close="repaymentDialog" aria-label="Close">×</button>
+      </div>
+      <input type="hidden" id="repaymentEntryId" />
+      <p class="repay-context" id="repayContext"></p>
+      <label class="field-label" for="repaymentAmount">AMOUNT REPAID</label>
+      <div class="amount-input">
+        <span class="currency-prefix">₹</span>
+        <input class="field" id="repaymentAmount" type="number" min="0.01" step="0.01" required inputmode="decimal" />
+      </div>
+      <div class="field-row">
+        <div class="field-wrap">
+          <label class="field-label" for="repaymentDate">DATE</label>
+          <input class="field" id="repaymentDate" type="date" required />
+        </div>
+        <div class="field-wrap">
+          <label class="field-label" for="repaymentNote">NOTE <span class="optional">OPTIONAL</span></label>
+          <input class="field" id="repaymentNote" maxlength="100" placeholder="e.g. UPI, Cash" />
+        </div>
+      </div>
+      <div class="form-bottom">
+        <div class="spacer"></div>
+        <button type="button" class="secondary-button" data-close="repaymentDialog">Cancel</button>
+        <button type="submit" class="primary-button">Save repayment</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Alias Dialog -->
+  <dialog id="aliasDialog" class="dialog">
+    <div class="dialog-head">
+      <div><p class="eyebrow">PERSON NAMES</p><h2 id="aliasTitle">Name aliases</h2></div>
+      <button type="button" class="close-button" data-close="aliasDialog" aria-label="Close">×</button>
+    </div>
+    <p class="settings-copy">Add nicknames or alternate spellings so new entries are automatically grouped with this person.</p>
+    <div id="aliasList" class="alias-list"></div>
+    <div class="alias-add">
+      <input class="field" id="aliasInput" maxlength="60" placeholder="Add nickname or spelling" />
+      <button type="button" class="primary-button" id="addAliasButton">Add</button>
+    </div>
+    <div class="form-bottom">
+      <div class="spacer"></div>
+      <button type="button" class="primary-button" data-close="aliasDialog">Done</button>
+    </div>
+  </dialog>
+
+  <!-- Merge Dialog -->
+  <dialog id="mergeDialog" class="dialog">
+    <form id="mergeForm">
+      <div class="dialog-head">
+        <div><p class="eyebrow">COMBINE PEOPLE</p><h2>Merge duplicate person</h2></div>
+        <button type="button" class="close-button" data-close="mergeDialog" aria-label="Close">×</button>
+      </div>
+      <p class="settings-copy" id="mergeCopy"></p>
+      <label class="field-label" for="mergeSelect">MERGE INTO</label>
+      <select class="field" id="mergeSelect" required></select>
+      <div class="form-bottom">
+        <div class="spacer"></div>
+        <button type="button" class="secondary-button" data-close="mergeDialog">Cancel</button>
+        <button type="submit" class="primary-button">Merge records</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Interactive Toast Notification -->
+  <div class="toast" id="toast" role="status" aria-live="polite">
+    <span id="toastText"></span>
+    <button type="button" id="toastUndo" class="toast-undo-btn" hidden>Undo</button>
+  </div>
+
   <script src="app.js"></script>
 </body>
 </html>
-
