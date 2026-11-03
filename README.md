@@ -14,14 +14,17 @@ The app shell works offline after the first load. For a personal ledger, make pe
 ## Included
 
 - Separate “they owe you” and “you owe them” transfers, with editable person, amount, direction, date, and note.
-- Per-person net balance, open transfer history, and a settled status for transfers that have been repaid.
-- Copyable per-person statement and whole-ledger overview.
-- On-device typo suggestions based on name similarity. Suggestions are never merged automatically: choose **Use this person** to group with an existing person, or **Keep as new** to create a separate record.
-- Search, direction filters, sorting, currency display preference, and JSON backup/restore.
+- Per-person net balance, overall net metering, separate gross totals in each direction, and a transfer history.
+- Partial repayments with dates and notes, plus actions to settle a remainder or undo a repayment.
+- Shareable per-person statements through Android's share menu, with date range and settled-transfer options.
+- On-device typo suggestions plus saved aliases. Suggestions are never merged automatically; people can also be merged manually. Changing a transfer's name moves that transfer to a separate person.
+- Search, direction filters, sorting, rupee-only display, and CSV export.
+- A 6–12 digit PIN that encrypts the local ledger using AES-GCM and PBKDF2. The app locks when you request it and after it has been in the background for two minutes.
+- Encrypted JSON backups. Choose the same PIN when exporting and restoring; the app does not store it.
 
 ## Privacy and limitations
 
-The ledger is stored in this browser’s local storage. Clearing the browser’s site data or removing the app data can erase it, so keep backups. The app does not sync across devices, encrypt its local records, connect to banks, or use an online AI service. Name matching is a small local spelling-similarity helper, not an AI model. Use a secure device lock and avoid entering sensitive account details in notes.
+The encrypted ledger is stored in this browser’s local storage. Clearing the browser’s site data or removing the app data can erase it, so keep encrypted backups. The app does not sync across devices, connect to banks, or use an online AI service. Name matching is a local spelling-similarity helper, not an AI model. A short numeric PIN is less resistant to guessing than a longer password; choose a PIN you do not use elsewhere and keep a backup.
 
-To use another currency, select it in settings. This changes the display symbol and formatting only; it does not convert values.
+All amounts are in Indian rupees.
 
