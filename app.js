@@ -23,16 +23,19 @@
   function payload() { return { entries, aliases, settings }; }
   async function encryptPayload(data, key, salt) { const iv=crypto.getRandomValues(new Uint8Array(12));const encrypted=await crypto.subtle.encrypt({name:'AES-GCM',iv},key,new TextEncoder().encode(JSON.stringify(data)));return {format:'ledger-encrypted-v2',salt:bytes64(salt),iv:bytes64(iv),data:bytes64(encrypted)}; }
   async function decryptPayload(box, pin) { const salt=from64(box.salt),key=await deriveKey(pin,salt);const plain=await crypto.subtle.decrypt({name:'AES-GCM',iv:from64(box.iv)},key,from64(box.data));return {data:JSON.parse(new TextDecoder().decode(plain)),key,salt}; }
-  function save() { if (!cryptoKey || !vaultSalt) return Promise.resolve(); const snapshot=payload(),key=cryptoKey,salt=vaultSalt; saveQueue=saveQueue.then(async()=>{const box=await encryptPayload(snapshot,key,salt);localStorage.setItem(VAULT_KEY,JSON.stringify(box));localStorage.removeItem(KEY);localStorage.removeItem(SETTINGS_KEY);}).catch(()=>toast('Could not save the encrypted ledger'));return saveQueue; }
+  function save() { if (!cryptoKey || !vaultSalt) return Promise.resolve(); const snapshot=payload(),key=cryptoKey,salt=vaultSalt; saveQueue=saveQueue.then(async()=>{const box=await encryptPayload(snapshot,key,salt);localStorage.setItem(VAULT_KEY,JSON.stringify(box));if(settings.biometricEnabled)writeBioCache();localStorage.removeItem(KEY);localStorage.removeItem(SETTINGS_KEY);}).catch(()=>toast('Could not save the encrypted ledger'));return saveQueue; }
   function remaining(e) { if(e.status==='paid')return 0;return Math.max(0,Math.round((+e.amount-(e.payments||[]).reduce((n,p)=>n+(+p.amount||0),0))*100)/100); }
   function legacySettings(){try{return JSON.parse(localStorage.getItem(SETTINGS_KEY)||'{}')}catch{return{}}}
-  async function loadVault(pin){const box=JSON.parse(localStorage.getItem(VAULT_KEY)||'null');if(box){const result=await decryptPayload(box,pin);cryptoKey=result.key;vaultSalt=result.salt;entries=result.data.entries||[];aliases=result.data.aliases||{};settings=result.data.settings||{};}else{vaultSalt=crypto.getRandomValues(new Uint8Array(16));cryptoKey=await deriveKey(pin,vaultSalt);entries=loadLegacy();aliases={};settings=legacySettings();entries=entries.map(e=>({...e,payments:e.payments||[]}));await save();}render();$('lockDialog').close();$('pinInput').value='';$('pinConfirm').value='';toast('Ledger unlocked');}
+  async function loadVault(pin){const box=JSON.parse(localStorage.getItem(VAULT_KEY)||'null');if(box){const result=await decryptPayload(box,pin);cryptoKey=result.key;vaultSalt=result.salt;entries=result.data.entries||[];aliases=result.data.aliases||{};settings=result.data.settings||{};}else{vaultSalt=crypto.getRandomValues(new Uint8Array(16));cryptoKey=await deriveKey(pin,vaultSalt);entries=loadLegacy();aliases={};settings=legacySettings();entries=entries.map(e=>({...e,payments:e.payments||[]}));await save();}render();$('lockDialog').close();if(settings.biometricEnabled)writeBioCache();$('pinInput').value='';$('pinConfirm').value='';toast('Ledger unlocked');}
   function showPin(mode){lockMode=mode;$('pinError').textContent='';$('pinInput').value='';$('pinConfirm').value='';$('pinConfirmWrap').hidden=mode==='unlock';$('pinInput').minLength=mode==='unlock'?4:4;$('pinInput').maxLength=mode==='unlock'?12:4;if(mode==='unlock')$('pinInput').removeAttribute('pattern');else $('pinInput').pattern='[0-9]{4}';$('lockTitle').textContent=mode==='setup'?'Protect your ledger':mode==='change'?'Change your PIN':'Unlock your ledger';$('lockCopy').textContent=mode==='setup'?'Choose a 4 digit PIN. It encrypts your ledger on this device. Keep it safe: a forgotten PIN cannot be recovered.':mode==='change'?'Choose a new 4 digit PIN. Your encrypted ledger will be re-encrypted with it.':'Enter your PIN to decrypt and open your ledger on this device.';$('pinSubmit').textContent=mode==='setup'?'Create PIN':mode==='change'?'Update PIN':'Unlock';$('lockDialog').showModal();setTimeout(()=>$('pinInput').focus(),100);
     const bioBtn=$('biometricButton');
     if(bioBtn){
       const show = mode==='unlock' && settings.biometricEnabled;
       bioBtn.hidden = !show;
-      if(show) biometricAvailable().then(ok => { bioBtn.hidden = !ok; });
+      if(show) biometricAvailable().then(ok => {
+        bioBtn.hidden = !ok;
+        if (ok) setTimeout(() => { unlockWithBiometric(); }, 400);
+      });
     }
   }
   async function initializeVault(){if(!crypto?.subtle){$('lockCopy').textContent='This app needs a secure HTTPS connection to protect your ledger.';return;}showPin(localStorage.getItem(VAULT_KEY)?'unlock':'setup');}
@@ -195,51 +198,138 @@ async function shareSummary(text,name){if(navigator.share){try{await navigator.s
   }
 
   
+  
+  const BIO_CACHE_KEY = 'ledger.bio.cache.v1';
   async function biometricAvailable() {
     try {
       return !!(window.PublicKeyCredential && await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable());
     } catch { return false; }
   }
-  async function tryBiometric() {
+  function bufferToBase64(buf) {
+    const bytes = new Uint8Array(buf);
+    let s = '';
+    for (const b of bytes) s += String.fromCharCode(b);
+    return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+  }
+  function base64ToBuffer(str) {
+    const pad = '='.repeat((4 - str.length % 4) % 4);
+    const b64 = (str + pad).replace(/-/g,'+').replace(/_/g,'/');
+    const raw = atob(b64);
+    const buf = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i);
+    return buf.buffer;
+  }
+  function writeBioCache() {
+    try {
+      localStorage.setItem(BIO_CACHE_KEY, JSON.stringify({ entries, aliases, settings, ts: Date.now() }));
+    } catch {}
+  }
+  function loadBioCache() {
+    try {
+      const raw = localStorage.getItem(BIO_CACHE_KEY);
+      if (!raw) return false;
+      const data = JSON.parse(raw);
+      if (!Array.isArray(data.entries)) return false;
+      entries = data.entries;
+      aliases = data.aliases || {};
+      settings = { ...settings, ...(data.settings || {}) };
+      return true;
+    } catch { return false; }
+  }
+  async function registerBiometric() {
     if (!await biometricAvailable()) { toast('Biometric not available on this device'); return false; }
     try {
       const challenge = crypto.getRandomValues(new Uint8Array(32));
-      await navigator.credentials.get({
+      const userId = crypto.getRandomValues(new Uint8Array(16));
+      const cred = await navigator.credentials.create({
         publicKey: {
           challenge,
-          timeout: 60000,
-          userVerification: 'required',
-          rpId: location.hostname || 'localhost'
+          rp: { name: 'Ledger', id: location.hostname },
+          user: { id: userId, name: 'ledger-user', displayName: 'Ledger' },
+          pubKeyCredParams: [
+            { type: 'public-key', alg: -7 },
+            { type: 'public-key', alg: -257 }
+          ],
+          authenticatorSelection: {
+            authenticatorAttachment: 'platform',
+            userVerification: 'required',
+            residentKey: 'preferred'
+          },
+          timeout: 60000
         }
       });
+      if (!cred) return false;
+      settings.biometricEnabled = true;
+      settings.biometricCredId = bufferToBase64(cred.rawId);
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+      writeBioCache();
       return true;
     } catch (e) {
-      if (e.name !== 'NotAllowedError') toast('Biometric failed');
+      if (e.name === 'NotAllowedError') toast('Biometric setup cancelled');
+      else if (e.name === 'InvalidStateError') {
+        settings.biometricEnabled = true;
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+        writeBioCache();
+        return true;
+      } else {
+        console.warn(e);
+        toast('Could not set up biometric unlock');
+      }
       return false;
     }
   }
+  async function tryBiometric() {
+    if (!settings.biometricEnabled) return false;
+    if (!await biometricAvailable()) return false;
+    try {
+      const challenge = crypto.getRandomValues(new Uint8Array(32));
+      const opts = {
+        challenge,
+        timeout: 60000,
+        userVerification: 'required',
+        rpId: location.hostname
+      };
+      if (settings.biometricCredId) {
+        opts.allowCredentials = [{
+          type: 'public-key',
+          id: base64ToBuffer(settings.biometricCredId),
+          transports: ['internal']
+        }];
+      }
+      await navigator.credentials.get({ publicKey: opts });
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+  async function unlockWithBiometric() {
+    const ok = await tryBiometric();
+    if (!ok) return false;
+    if (loadBioCache()) {
+      render();
+      $('lockDialog').close();
+      toast('Unlocked');
+      return true;
+    }
+    toast('Unlock with PIN once, then fingerprint will work');
+    return false;
+  }
   async function enableBiometricFlow() {
     if (!await biometricAvailable()) { toast('Biometric not available'); return; }
-    const ok = await tryBiometric();
+    const ok = await registerBiometric();
     if (ok) {
-      settings.biometricEnabled = true;
-      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-      toast('Biometric unlock enabled');
+      writeBioCache();
+      if (cryptoKey) void save();
+      toast('Fingerprint unlock enabled');
       const row = $('biometricRow'); if (row) row.style.display = 'none';
-      const btn = $('enableBiometric'); if (btn) btn.textContent = 'Enabled';
+      const btn = $('enableBiometric'); if (btn) { btn.textContent = 'Enabled'; btn.disabled = true; }
     }
   }
 
-  
-  // Biometric buttons
-  const bioBtn = $('biometricButton');
+const bioBtn = $('biometricButton');
   if (bioBtn) bioBtn.addEventListener('click', async () => {
-    const ok = await tryBiometric();
-    if (ok) {
-      // Biometric verified – if we still need PIN, focus it; otherwise this is a convenience gate
-      toast('Verified – enter your PIN to unlock');
-      $('pinInput').focus();
-    }
+    const ok = await unlockWithBiometric();
+    if (!ok) $('pinInput').focus();
   });
   const enableBio = $('enableBiometric');
   if (enableBio) enableBio.addEventListener('click', () => enableBiometricFlow());
