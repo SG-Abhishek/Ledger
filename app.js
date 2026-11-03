@@ -30,12 +30,10 @@
   function showPin(mode){lockMode=mode;$('pinError').textContent='';$('pinInput').value='';$('pinConfirm').value='';$('pinConfirmWrap').hidden=mode==='unlock';$('pinInput').minLength=mode==='unlock'?4:4;$('pinInput').maxLength=mode==='unlock'?12:4;if(mode==='unlock')$('pinInput').removeAttribute('pattern');else $('pinInput').pattern='[0-9]{4}';$('lockTitle').textContent=mode==='setup'?'Protect your ledger':mode==='change'?'Change your PIN':'Unlock your ledger';$('lockCopy').textContent=mode==='setup'?'Choose a 4 digit PIN. It encrypts your ledger on this device. Keep it safe: a forgotten PIN cannot be recovered.':mode==='change'?'Choose a new 4 digit PIN. Your encrypted ledger will be re-encrypted with it.':'Enter your PIN to decrypt and open your ledger on this device.';$('pinSubmit').textContent=mode==='setup'?'Create PIN':mode==='change'?'Update PIN':'Unlock';$('lockDialog').showModal();setTimeout(()=>$('pinInput').focus(),100);
     const bioBtn=$('biometricButton');
     if(bioBtn){
-      const show = mode==='unlock' && settings.biometricEnabled;
+      const meta = loadBioMeta();
+      const show = mode==='unlock' && (meta.enabled || settings.biometricEnabled);
       bioBtn.hidden = !show;
-      if(show) biometricAvailable().then(ok => {
-        bioBtn.hidden = !ok;
-        if (ok) setTimeout(() => { unlockWithBiometric(); }, 400);
-      });
+      if(show) biometricAvailable().then(ok => { bioBtn.hidden = !ok; });
     }
   }
   async function initializeVault(){if(!crypto?.subtle){$('lockCopy').textContent='This app needs a secure HTTPS connection to protect your ledger.';return;}showPin(localStorage.getItem(VAULT_KEY)?'unlock':'setup');}
@@ -199,7 +197,20 @@ async function shareSummary(text,name){if(navigator.share){try{await navigator.s
 
   
   
+  
   const BIO_CACHE_KEY = 'ledger.bio.cache.v1';
+  const BIO_META_KEY = 'ledger.bio.meta.v1';
+
+  function loadBioMeta() {
+    try { return JSON.parse(localStorage.getItem(BIO_META_KEY) || '{}'); } catch { return {}; }
+  }
+  function saveBioMeta(meta) {
+    localStorage.setItem(BIO_META_KEY, JSON.stringify(meta));
+    settings.biometricEnabled = !!meta.enabled;
+    settings.biometricCredId = meta.credId || null;
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  }
+
   async function biometricAvailable() {
     try {
       return !!(window.PublicKeyCredential && await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable());
@@ -241,11 +252,16 @@ async function shareSummary(text,name){if(navigator.share){try{await navigator.s
     try {
       const challenge = crypto.getRandomValues(new Uint8Array(32));
       const userId = crypto.getRandomValues(new Uint8Array(16));
+      const rpId = location.hostname;
       const cred = await navigator.credentials.create({
         publicKey: {
           challenge,
-          rp: { name: 'Ledger', id: location.hostname },
-          user: { id: userId, name: 'ledger-user', displayName: 'Ledger' },
+          rp: { name: 'Ledger', id: rpId },
+          user: {
+            id: userId,
+            name: 'ledger@' + rpId,
+            displayName: 'Ledger'
+          },
           pubKeyCredParams: [
             { type: 'public-key', alg: -7 },
             { type: 'public-key', alg: -257 }
@@ -253,52 +269,64 @@ async function shareSummary(text,name){if(navigator.share){try{await navigator.s
           authenticatorSelection: {
             authenticatorAttachment: 'platform',
             userVerification: 'required',
-            residentKey: 'preferred'
+            residentKey: 'required',
+            requireResidentKey: true
           },
-          timeout: 60000
+          timeout: 90000
         }
       });
-      if (!cred) return false;
-      settings.biometricEnabled = true;
-      settings.biometricCredId = bufferToBase64(cred.rawId);
-      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+      if (!cred || !cred.rawId) return false;
+      const credId = bufferToBase64(cred.rawId);
+      saveBioMeta({ enabled: true, credId, rpId });
       writeBioCache();
       return true;
     } catch (e) {
-      if (e.name === 'NotAllowedError') toast('Biometric setup cancelled');
+      console.warn('registerBiometric', e);
+      if (e.name === 'NotAllowedError') toast('Fingerprint setup cancelled');
       else if (e.name === 'InvalidStateError') {
-        settings.biometricEnabled = true;
-        localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+        // Credential may already exist – mark enabled and rely on discoverable get
+        saveBioMeta({ enabled: true, credId: loadBioMeta().credId || null, rpId: location.hostname });
         writeBioCache();
         return true;
-      } else {
-        console.warn(e);
-        toast('Could not set up biometric unlock');
-      }
+      } else toast('Could not set up fingerprint: ' + (e.name || 'error'));
       return false;
     }
   }
   async function tryBiometric() {
-    if (!settings.biometricEnabled) return false;
+    const meta = loadBioMeta();
+    if (!meta.enabled && !settings.biometricEnabled) return false;
     if (!await biometricAvailable()) return false;
     try {
       const challenge = crypto.getRandomValues(new Uint8Array(32));
+      const rpId = meta.rpId || location.hostname;
       const opts = {
         challenge,
-        timeout: 60000,
+        timeout: 90000,
         userVerification: 'required',
-        rpId: location.hostname
+        rpId
       };
-      if (settings.biometricCredId) {
+      if (meta.credId) {
         opts.allowCredentials = [{
           type: 'public-key',
-          id: base64ToBuffer(settings.biometricCredId),
+          id: base64ToBuffer(meta.credId),
           transports: ['internal']
         }];
       }
-      await navigator.credentials.get({ publicKey: opts });
-      return true;
+      let cred = null;
+      try {
+        cred = await navigator.credentials.get({ publicKey: opts });
+      } catch (e1) {
+        // Retry without allowCredentials (discoverable / passkey list)
+        if (meta.credId) {
+          delete opts.allowCredentials;
+          cred = await navigator.credentials.get({ publicKey: opts });
+        } else {
+          throw e1;
+        }
+      }
+      return !!cred;
     } catch (e) {
+      console.warn('tryBiometric', e);
       return false;
     }
   }
@@ -311,16 +339,19 @@ async function shareSummary(text,name){if(navigator.share){try{await navigator.s
       toast('Unlocked');
       return true;
     }
-    toast('Unlock with PIN once, then fingerprint will work');
+    toast('Unlock once with PIN, then fingerprint will work');
     return false;
   }
   async function enableBiometricFlow() {
     if (!await biometricAvailable()) { toast('Biometric not available'); return; }
+    // Must have data in memory to seed cache
+    if (!entries) entries = [];
+    writeBioCache();
     const ok = await registerBiometric();
     if (ok) {
       writeBioCache();
       if (cryptoKey) void save();
-      toast('Fingerprint unlock enabled');
+      toast('Fingerprint unlock ready');
       const row = $('biometricRow'); if (row) row.style.display = 'none';
       const btn = $('enableBiometric'); if (btn) { btn.textContent = 'Enabled'; btn.disabled = true; }
     }
