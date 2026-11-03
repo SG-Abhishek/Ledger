@@ -19,12 +19,14 @@ The app shell works offline after the first load. For a personal ledger, make pe
 - Shareable per-person statements through Android's share menu, with date range and settled-transfer options.
 - On-device typo suggestions plus saved aliases. Suggestions are never merged automatically; people can also be merged manually. Changing a transfer's name moves that transfer to a separate person.
 - Search, direction filters, sorting, rupee-only display, and CSV export.
-- A 6–12 digit PIN that encrypts the local ledger using AES-GCM and PBKDF2. The app locks when you request it and after it has been in the background for two minutes.
+- A 4 digit PIN that encrypts the local ledger using AES-GCM and PBKDF2. The app locks when you request it and after it has been in the background for two minutes.
 - Encrypted JSON backups. Choose the same PIN when exporting and restoring; the app does not store it.
+
+If you set a longer PIN before this update, unlock with that PIN once; the app will then prompt you to change it to 4 digits.
 
 ## Privacy and limitations
 
-The encrypted ledger is stored in this browser’s local storage. Clearing the browser’s site data or removing the app data can erase it, so keep encrypted backups. The app does not sync across devices, connect to banks, or use an online AI service. Name matching is a local spelling-similarity helper, not an AI model. A short numeric PIN is less resistant to guessing than a longer password; choose a PIN you do not use elsewhere and keep a backup.
+The encrypted ledger is stored in this browser’s local storage. Clearing the browser’s site data or removing the app data can erase it, so keep encrypted backups. The app does not sync across devices, connect to banks, or use an online AI service. Name matching is a local spelling-similarity helper, not an AI model. A 4 digit PIN is easier to guess than a longer password; choose one you do not use elsewhere and keep an encrypted backup.
 
 All amounts are in Indian rupees.
 
