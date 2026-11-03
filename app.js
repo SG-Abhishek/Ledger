@@ -33,7 +33,11 @@
       const meta = loadBioMeta();
       const show = mode==='unlock' && (meta.enabled || settings.biometricEnabled);
       bioBtn.hidden = !show;
-      if(show) biometricAvailable().then(ok => { bioBtn.hidden = !ok; });
+      if(show) biometricAvailable().then(ok => {
+        bioBtn.hidden = !ok;
+        // Auto-prompt fingerprint as soon as lock screen appears
+        if (ok) setTimeout(() => { unlockWithBiometric(); }, 350);
+      });
     }
   }
   async function initializeVault(){if(!crypto?.subtle){$('lockCopy').textContent='This app needs a secure HTTPS connection to protect your ledger.';return;}showPin(localStorage.getItem(VAULT_KEY)?'unlock':'setup');}
@@ -339,7 +343,7 @@ async function shareSummary(text,name){if(navigator.share){try{await navigator.s
       toast('Unlocked');
       return true;
     }
-    toast('Unlock once with PIN, then fingerprint will work');
+    // Cache missing – need one PIN unlock to seed it
     return false;
   }
   async function enableBiometricFlow() {
