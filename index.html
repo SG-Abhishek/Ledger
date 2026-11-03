@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#101b2b" />
+  <meta name="description" content="A private personal ledger for money you owe and money owed to you." />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="styles.css" />
+  <title>Ledger — Personal balances</title>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="#" aria-label="Ledger home"><span class="brand-mark">L</span><span>ledger<span class="brand-dot">.</span></span></a>
+      <div class="top-actions">
+        <button class="icon-button" id="backupButton" title="Backup and restore" aria-label="Backup and restore">↥</button>
+        <button class="avatar" id="settingsButton" title="Settings" aria-label="Settings">☺</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="welcome-row">
+        <div><p class="eyebrow" id="todayLabel">PERSONAL LEDGER</p><h1>Your money,<br class="mobile-break" /> in good order.</h1><p class="subhead">A clear picture of what’s owed, both ways.</p></div>
+        <button class="primary-button desktop-add" id="addButton"><span>＋</span> Add a transfer</button>
+      </section>
+
+      <section class="balance-grid" aria-label="Balance overview">
+        <article class="balance-card balance-net"><div class="card-label"><span class="label-icon">◈</span> NET BALANCE <span class="info-dot" title="What you're owed minus what you owe">i</span></div><div class="balance-amount" id="netBalance">₹0</div><div class="balance-foot"><span id="netCaption">All settled up</span><span class="sparkline">⌁</span></div></article>
+        <article class="balance-card"><div class="card-label"><span class="label-icon green">↙</span> OWED TO YOU</div><div class="balance-amount" id="owedToYou">₹0</div><div class="balance-foot"><span>Across <b id="toYouCount">0</b> people</span><span class="mini-arrow">↗</span></div></article>
+        <article class="balance-card"><div class="card-label"><span class="label-icon coral">↗</span> YOU OWE</div><div class="balance-amount" id="youOwe">₹0</div><div class="balance-foot"><span>Across <b id="oweCount">0</b> people</span><span class="mini-arrow">↗</span></div></article>
+      </section>
+
+      <section class="section-head"><div><p class="eyebrow">YOUR PEOPLE</p><h2>Balances & activity</h2></div><button class="text-button" id="copyAllButton">Copy overview <span>↗</span></button></section>
+      <section class="toolbar">
+        <label class="search"><span>⌕</span><input id="searchInput" placeholder="Search people or notes…" autocomplete="off" /></label>
+        <div class="filters" role="group" aria-label="Filter transfers"><button class="filter active" data-filter="all">All <span id="allCount">0</span></button><button class="filter" data-filter="owed">Owed to you</button><button class="filter" data-filter="owe">You owe</button></div>
+        <select id="sortSelect" aria-label="Sort people"><option value="recent">Most recent</option><option value="name">Name A–Z</option><option value="amount">Largest balance</option></select>
+      </section>
+      <section id="peopleList" class="people-list" aria-live="polite"></section>
+      <section class="privacy-note"><span>♧</span><p><b>Your ledger stays yours.</b> Your entries are saved only on this device. No bank connection, no account, no cloud sync.</p></section>
+    </main>
+    <button class="fab" id="fabButton" aria-label="Add a transfer">＋</button>
+    <footer>MADE FOR YOUR PEACE OF MIND <span>·</span> PRIVATE BY DESIGN</footer>
+  </div>
+
+  <dialog id="entryDialog" class="dialog"><form id="entryForm" method="dialog">
+    <div class="dialog-head"><div><p class="eyebrow" id="formEyebrow">NEW TRANSFER</p><h2 id="formTitle">Add a transfer</h2></div><button type="button" class="close-button" data-close="entryDialog" aria-label="Close">×</button></div>
+    <input type="hidden" id="entryId" />
+    <label class="field-label" for="personName">PERSON</label><input class="field" id="personName" required maxlength="60" placeholder="e.g. Aditi Sharma" autocomplete="name" />
+    <div id="matchHint" class="match-hint" hidden></div>
+    <label class="field-label">DIRECTION</label><div class="direction-picker"><label class="direction-option"><input type="radio" name="direction" value="toYou" checked /><span class="direction-box"><b>They owe you</b><small>Money you lent or paid for them</small></span></label><label class="direction-option"><input type="radio" name="direction" value="youOwe" /><span class="direction-box"><b>You owe them</b><small>Money they lent or paid for you</small></span></label></div>
+    <div class="field-row"><div class="field-wrap"><label class="field-label" for="amount">AMOUNT</label><div class="amount-input"><span>₹</span><input class="field" id="amount" type="number" min="0.01" step="0.01" required placeholder="0.00" inputmode="decimal" /></div></div><div class="field-wrap"><label class="field-label" for="transferDate">TRANSFER DATE</label><input class="field" id="transferDate" type="date" required /></div></div>
+    <label class="field-label" for="note">NOTE <span class="optional">OPTIONAL</span></label><input class="field" id="note" maxlength="120" placeholder="What was this for?" />
+    <div class="form-bottom"><button type="button" class="delete-button" id="deleteEntry" hidden>Delete transfer</button><div class="spacer"></div><button type="button" class="secondary-button" data-close="entryDialog">Cancel</button><button type="submit" class="primary-button">Save transfer</button></div>
+  </form></dialog>
+  <dialog id="personDialog" class="dialog person-dialog"><div id="personDetail"></div></dialog>
+  <dialog id="settingsDialog" class="dialog"><div class="dialog-head"><div><p class="eyebrow">PREFERENCES</p><h2>Ledger settings</h2></div><button type="button" class="close-button" data-close="settingsDialog" aria-label="Close">×</button></div><label class="field-label" for="currencySelect">CURRENCY</label><select class="field" id="currencySelect"><option value="INR">Indian Rupee · ₹</option><option value="USD">US Dollar · $</option><option value="EUR">Euro · €</option><option value="GBP">British Pound · £</option><option value="AED">UAE Dirham · د.إ</option><option value="CAD">Canadian Dollar · CA$</option><option value="AUD">Australian Dollar · A$</option></select><p class="settings-copy">Currency changes how amounts are displayed. It does not convert existing entries.</p><div class="form-bottom"><div class="spacer"></div><button class="primary-button" id="saveSettings">Done</button></div></dialog>
+  <dialog id="backupDialog" class="dialog"><div class="dialog-head"><div><p class="eyebrow">YOUR DATA</p><h2>Backup & restore</h2></div><button type="button" class="close-button" data-close="backupDialog" aria-label="Close">×</button></div><p class="settings-copy">Keep a copy of your ledger, or restore it on this device. Your backup includes people, transfers and currency preference.</p><div class="backup-actions"><button class="secondary-button" id="exportButton">Download backup</button><label class="secondary-button import-label">Restore from file<input type="file" id="importFile" accept="application/json,.json" /></label></div><p class="settings-copy tiny">Restoring replaces the current ledger on this device.</p></dialog>
+  <div class="toast" id="toast" role="status"></div>
+  <script src="app.js"></script>
+</body>
+</html>
+
