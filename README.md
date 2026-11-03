@@ -1,17 +1,26 @@
-# Ledger — Personal Balances
+# Ledger — Personal balances
 
-A secure, private personal finance ledger for tracking money lent and borrowed between friends, family, and peers.
+A private, installable ledger for tracking transfers between you and other people.
 
-## Security Architecture
+## Features
 
-- **Zero Unencrypted Persistence:** No transactions, balances, or contact names are ever saved unencrypted to disk or `localStorage`.
-- **AES-256-GCM Vault:** Database payloads are encrypted with authenticated AES-GCM derived from a user-selected PIN via 250,000 PBKDF2-SHA256 iterations.
-- **Hardware-Backed Biometrics:** Biometric authentication uses the **WebAuthn PRF (Pseudo-Random Function) extension** to securely unwrap the master AES key without storing unencrypted cache files.
-- **Background Auto-Lock:** Monitors device sleep and app switching using differential timestamp tracking, reliably locking the vault even when OS-level power saving halts JavaScript timers.
-- **Integer Minor Unit Precision:** All financial calculations operate on exact integer minor units (paise/cents) to eliminate floating-point rounding drift.
+- They-owe-you / you-owe-them transfers with partial repayments
+- Per-person net balance, aliases, and merge duplicates
+- Shareable statements (worded for the other person)
+- Settle all with a person + undo
+- Optional due / remind dates
+- Light / Dark / System themes
+- Simple insights card
+- Encrypted local storage (PIN + optional biometric gate)
+- CSV export and encrypted JSON backup
+- Works offline as a PWA
 
-## Setup & Running
+## Use on Android
 
-1. Host over HTTPS or serve locally:
-   ```bash
-   npx serve .
+1. Host the folder over HTTPS (or open via a local server).
+2. Open in Chrome → menu → **Install app** / **Add to Home screen**.
+3. Set a 4-digit PIN when prompted.
+
+Data never leaves your device. Keep encrypted backups.
+
+All amounts are in Indian rupees (₹).

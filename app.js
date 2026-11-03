@@ -1,1331 +1,447 @@
 (() => {
-  'use strict';
-
-  // Constants & Storage Keys
-  const DB_NAME = 'ledger_vault_db';
-  const DB_STORE = 'vault_store';
-  const VAULT_RECORD_KEY = 'encrypted_vault';
-  const SETTINGS_KEY = 'ledger.settings.v2';
-  const BIO_META_KEY = 'ledger.bio.prf.v1';
-  const AUTO_LOCK_MS = 2 * 60 * 1000; // 2 minutes
-
-  // Currency symbols & configurations
-  const CURRENCIES = {
-    INR: { code: 'INR', symbol: '₹', locale: 'en-IN' },
-    USD: { code: 'USD', symbol: '$', locale: 'en-US' },
-    EUR: { code: 'EUR', symbol: '€', locale: 'de-DE' },
-    GBP: { code: 'GBP', symbol: '£', locale: 'en-GB' },
-    AED: { code: 'AED', symbol: 'د.إ', locale: 'ar-AE' }
-  };
-
+  const KEY = 'ledger.entries.v1', SETTINGS_KEY = 'ledger.settings.v1', VAULT_KEY = 'ledger.vault.v2';
   const $ = (id) => document.getElementById(id);
+  const today = () => { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
+  let entries = [], aliases = {}, settings = loadSettings(), filter = 'all', query = '', sort = 'recent', selectedPersonId = null, toastTimer, cryptoKey = null, vaultSalt = null, lockMode = 'unlock', saveQueue = Promise.resolve(), lockTimer, undoStack = [], lastBackupPrompt = 0;
 
-  // In-memory application state
-  let entries = [];
-  let aliases = {};
-  let settings = loadSettings();
-  let filter = 'all';
-  let query = '';
-  let sort = 'recent';
-  let selectedPersonId = null;
-  let chosenPerson = null;
-
-  // Cryptographic session state (never written to disk unencrypted)
-  let cryptoKey = null;
-  let vaultSalt = null;
-  let lockMode = 'unlock'; // 'unlock' | 'setup' | 'change'
-  let backgroundTimestamp = null;
-  let toastTimer = null;
-  let pendingConfirmResolve = null;
-  let pendingBackupPinResolve = null;
-
-  // Undo stack
-  const undoStack = [];
-
-  // ==========================================
-  // Storage: IndexedDB Wrapper
-  // ==========================================
-  function openDatabase() {
-    return new Promise((resolve, reject) => {
-      const req = indexedDB.open(DB_NAME, 1);
-      req.onupgradeneeded = () => {
-        const db = req.result;
-        if (!db.objectStoreNames.contains(DB_STORE)) {
-          db.createObjectStore(DB_STORE);
-        }
-      };
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    });
-  }
-
-  async function idbGet(key) {
-    try {
-      const db = await openDatabase();
-      return new Promise((resolve, reject) => {
-        const tx = db.transaction(DB_STORE, 'readonly');
-        const req = tx.objectStore(DB_STORE).get(key);
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => reject(req.error);
-      });
-    } catch {
-      return localStorage.getItem(key);
-    }
-  }
-
-  async function idbSet(key, val) {
-    try {
-      const db = await openDatabase();
-      return new Promise((resolve, reject) => {
-        const tx = db.transaction(DB_STORE, 'readwrite');
-        tx.objectStore(DB_STORE).put(val, key);
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-      });
-    } catch {
-      localStorage.setItem(key, typeof val === 'string' ? val : JSON.stringify(val));
-    }
-  }
-
-  // ==========================================
-  // Cryptography Helpers
-  // ==========================================
-  function bytes64(bytes) {
-    let binary = '';
-    const buf = new Uint8Array(bytes);
-    for (let i = 0; i < buf.length; i++) binary += String.fromCharCode(buf[i]);
-    return btoa(binary);
-  }
-
-  function from64(str) {
-    const bin = atob(str);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    return bytes;
-  }
-
-  async function deriveKeyFromPin(pin, salt) {
-    const rawPin = new TextEncoder().encode(String(pin));
-    const baseKey = await crypto.subtle.importKey('raw', rawPin, 'PBKDF2', false, ['deriveKey']);
-    return crypto.subtle.deriveKey(
-      { name: 'PBKDF2', salt, iterations: 250000, hash: 'SHA-256' },
-      baseKey,
-      { name: 'AES-GCM', length: 256 },
-      true, // extractable for secure hardware wrapping
-      ['encrypt', 'decrypt']
-    );
-  }
-
-  async function encryptPayload(data, key, salt) {
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-    const encoded = new TextEncoder().encode(JSON.stringify(data));
-    const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, encoded);
-    return {
-      format: 'ledger-encrypted-v2',
-      salt: bytes64(salt),
-      iv: bytes64(iv),
-      data: bytes64(encrypted)
-    };
-  }
-
-  async function decryptPayload(box, key) {
-    const iv = from64(box.iv);
-    const data = from64(box.data);
-    const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, data);
-    return JSON.parse(new TextDecoder().decode(decrypted));
-  }
-
-  // ==========================================
-  // Vault Persistence (Synchronized)
-  // ==========================================
-  let saveQueue = Promise.resolve();
-  function save() {
-    if (!cryptoKey || !vaultSalt) return Promise.resolve();
-    const snapshot = { entries, aliases, settings };
-    const currentKey = cryptoKey;
-    const currentSalt = vaultSalt;
-
-    saveQueue = saveQueue.then(async () => {
-      const box = await encryptPayload(snapshot, currentKey, currentSalt);
-      await idbSet(VAULT_RECORD_KEY, JSON.stringify(box));
-    }).catch((err) => {
-      console.error(err);
-      toast('Failed to save encrypted vault');
-    });
-
-    return saveQueue;
-  }
-
-  // ==========================================
-  // WebAuthn PRF Biometrics (Zero Plaintext Leak)
-  // ==========================================
-  function isPrfSupported() {
-    return !!(window.PublicKeyCredential && PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable);
-  }
-
-  async function registerBiometricKey(masterKey) {
-    if (!isPrfSupported()) return false;
-    try {
-      const challenge = crypto.getRandomValues(new Uint8Array(32));
-      const userId = crypto.getRandomValues(new Uint8Array(16));
-      const prfSalt = crypto.getRandomValues(new Uint8Array(32));
-
-      const cred = await navigator.credentials.create({
-        publicKey: {
-          challenge,
-          rp: { name: 'Ledger Local', id: location.hostname },
-          user: { id: userId, name: 'vault-user', displayName: 'Vault User' },
-          pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
-          authenticatorSelection: {
-            authenticatorAttachment: 'platform',
-            userVerification: 'required',
-            residentKey: 'preferred'
-          },
-          extensions: {
-            prf: { eval: { first: prfSalt } }
-          }
-        }
-      });
-
-      if (!cred || !cred.rawId) return false;
-      const extResults = cred.getClientExtensionResults();
-      if (!extResults.prf?.results?.first) {
-        toast('Device does not support hardware PRF key derivation');
-        return false;
-      }
-
-      // Derive symmetric wrapping key from PRF output
-      const prfKeyMaterial = extResults.prf.results.first;
-      const bioKey = await crypto.subtle.importKey('raw', prfKeyMaterial, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
-
-      // Export and encrypt the master vault key
-      const rawMasterKey = await crypto.subtle.exportKey('raw', masterKey);
-      const iv = crypto.getRandomValues(new Uint8Array(12));
-      const wrapped = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, bioKey, rawMasterKey);
-
-      const meta = {
-        enabled: true,
-        credId: bytes64(cred.rawId),
-        prfSalt: bytes64(prfSalt),
-        iv: bytes64(iv),
-        wrappedKey: bytes64(wrapped),
-        vaultSalt: bytes64(vaultSalt)
-      };
-
-      localStorage.setItem(BIO_META_KEY, JSON.stringify(meta));
-      settings.biometricEnabled = true;
-      persistSettings();
-      return true;
-    } catch (e) {
-      console.warn('Biometric registration error:', e);
-      return false;
-    }
-  }
-
-  async function unlockWithBiometric() {
-    const rawMeta = localStorage.getItem(BIO_META_KEY);
-    if (!rawMeta) return false;
-    try {
-      const meta = JSON.parse(rawMeta);
-      const prfSalt = from64(meta.prfSalt);
-
-      const cred = await navigator.credentials.get({
-        publicKey: {
-          challenge: crypto.getRandomValues(new Uint8Array(32)),
-          rpId: location.hostname,
-          userVerification: 'required',
-          allowCredentials: [{
-            type: 'public-key',
-            id: from64(meta.credId),
-            transports: ['internal']
-          }],
-          extensions: {
-            prf: { eval: { first: prfSalt } }
-          }
-        }
-      });
-
-      if (!cred) return false;
-      const extResults = cred.getClientExtensionResults();
-      const prfKeyMaterial = extResults.prf?.results?.first;
-      if (!prfKeyMaterial) return false;
-
-      // Import PRF derived key and unwrap master key
-      const bioKey = await crypto.subtle.importKey('raw', prfKeyMaterial, { name: 'AES-GCM' }, false, ['decrypt']);
-      const rawMasterKey = await crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv: from64(meta.iv) },
-        bioKey,
-        from64(meta.wrappedKey)
-      );
-
-      // Re-import the master cryptoKey
-      cryptoKey = await crypto.subtle.importKey('raw', rawMasterKey, { name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
-      vaultSalt = from64(meta.vaultSalt);
-
-      // Load and decrypt vault
-      const rawBox = await idbGet(VAULT_RECORD_KEY);
-      if (rawBox) {
-        const box = typeof rawBox === 'string' ? JSON.parse(rawBox) : rawBox;
-        const decrypted = await decryptPayload(box, cryptoKey);
-        entries = decrypted.entries || [];
-        aliases = decrypted.aliases || {};
-        settings = { ...settings, ...(decrypted.settings || {}) };
-      }
-
-      render();
-      $('lockDialog').close();
-      toast('Unlocked via Biometrics');
-      return true;
-    } catch (e) {
-      console.warn('Biometric unlock failed:', e);
-      return false;
-    }
-  }
-
-  // ==========================================
-  // Vault Lifecycle & Unlock
-  // ==========================================
-  async function loadVault(pin) {
-    const rawBox = await idbGet(VAULT_RECORD_KEY);
-    if (rawBox) {
-      const box = typeof rawBox === 'string' ? JSON.parse(rawBox) : rawBox;
-      vaultSalt = from64(box.salt);
-      cryptoKey = await deriveKeyFromPin(pin, vaultSalt);
-      const decrypted = await decryptPayload(box, cryptoKey);
-      entries = decrypted.entries || [];
-      aliases = decrypted.aliases || {};
-      settings = { ...settings, ...(decrypted.settings || {}) };
-    } else {
-      vaultSalt = crypto.getRandomValues(new Uint8Array(16));
-      cryptoKey = await deriveKeyFromPin(pin, vaultSalt);
-      entries = [];
-      aliases = {};
-      await save();
-    }
-    render();
-    $('lockDialog').close();
-    $('pinInput').value = '';
-    $('pinConfirm').value = '';
-    toast('Vault unlocked');
-  }
-
-  function showPinDialog(mode) {
-    lockMode = mode;
-    $('pinError').textContent = '';
-    $('pinInput').value = '';
-    $('pinConfirm').value = '';
-    $('pinConfirmWrap').hidden = mode === 'unlock';
-    $('lockTitle').textContent = mode === 'setup' ? 'Protect your ledger' : mode === 'change' ? 'Change your PIN' : 'Unlock your ledger';
-    $('lockCopy').textContent = mode === 'setup'
-      ? 'Choose a 4 to 6 digit PIN. Keep it safe: a forgotten PIN cannot be recovered.'
-      : mode === 'change'
-      ? 'Choose a new PIN. Your vault will be re-encrypted.'
-      : 'Enter your PIN to decrypt your balances.';
-    $('pinSubmit').textContent = mode === 'setup' ? 'Create PIN' : mode === 'change' ? 'Update PIN' : 'Unlock';
-
-    const bioBtn = $('biometricButton');
-    const hasBio = !!localStorage.getItem(BIO_META_KEY);
-    bioBtn.hidden = !(mode === 'unlock' && hasBio);
-
-    $('lockDialog').showModal();
-    setTimeout(() => $('pinInput').focus(), 100);
-
-    if (mode === 'unlock' && hasBio) {
-      unlockWithBiometric().catch(() => {});
-    }
-  }
-
-  function lockLedger() {
-    for (const dialog of document.querySelectorAll('dialog')) {
-      if (dialog.open) dialog.close();
-    }
-    entries = [];
-    aliases = {};
-    cryptoKey = null;
-    vaultSalt = null;
-    $('personDetail').innerHTML = '';
-    render();
-    showPinDialog('unlock');
-  }
-
-  // ==========================================
-  // Financial Calculations & Formatters (Minor units: Paise/Cents)
-  // ==========================================
-  function parseToMinorUnits(amount) {
-    return Math.round(Number(amount || 0) * 100);
-  }
-
-  function money(minorUnits) {
-    const cur = CURRENCIES[settings.currency] || CURRENCIES.INR;
-    const value = Math.abs(minorUnits || 0) / 100;
-    return new Intl.NumberFormat(cur.locale, {
-      style: 'currency',
-      currency: cur.code,
-      minimumFractionDigits: 2
-    }).format(value);
-  }
-
-  function remainingMinor(entry) {
-    if (entry.status === 'paid') return 0;
-    const total = parseToMinorUnits(entry.amount);
-    const paid = (entry.payments || []).reduce((acc, p) => acc + parseToMinorUnits(p.amount), 0);
-    return Math.max(0, total - paid);
-  }
-
-  function dateText(iso) {
-    if (!iso) return '';
-    return new Intl.DateTimeFormat(undefined, { day: 'numeric', month: 'short', year: 'numeric' }).format(new Date(`${iso}T12:00:00`));
-  }
-
-  function esc(s) {
-    return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  }
-
-  function today() {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  }
-
-  // ==========================================
-  // Settings & Themes
-  // ==========================================
-  function loadSettings() {
-    try {
-      return { currency: 'INR', theme: 'system', ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') };
-    } catch {
-      return { currency: 'INR', theme: 'system' };
-    }
-  }
-
-  function persistSettings() {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-    void save();
-  }
-
+  function loadLegacy() { try { const v = JSON.parse(localStorage.getItem(KEY) || '[]'); return Array.isArray(v) ? v : []; } catch { return []; } }
+  function loadSettings() { try { return { ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') }; } catch { return {}; } }
   function applyTheme() {
     const t = settings.theme || 'system';
     if (t === 'system') document.documentElement.removeAttribute('data-theme');
     else document.documentElement.setAttribute('data-theme', t);
-
-    const isDark = t === 'dark' || (t === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
     const meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.setAttribute('content', isDark ? '#0c1420' : '#f7f8f9');
-
-    // Update currency prefixes
-    const prefix = CURRENCIES[settings.currency]?.symbol || '₹';
-    document.querySelectorAll('.currency-prefix').forEach(el => el.textContent = prefix);
+    if (meta) {
+      const dark = t === 'dark' || (t === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      meta.setAttribute('content', dark ? '#0d1520' : '#f7f8f9');
+    }
   }
-
-  // ==========================================
-  // Aggregation & Rendering
-  // ==========================================
+  applyTheme();
+  function bytes64(bytes) { let binary='';for(const b of new Uint8Array(bytes))binary+=String.fromCharCode(b);return btoa(binary); }
+  function from64(value) { return Uint8Array.from(atob(value), c => c.charCodeAt(0)); }
+  async function deriveKey(pin, salt) { const material = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveKey']); return crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations:250000,hash:'SHA-256'},material,{name:'AES-GCM',length:256},false,['encrypt','decrypt']); }
+  function payload() { return { entries, aliases, settings }; }
+  async function encryptPayload(data, key, salt) { const iv=crypto.getRandomValues(new Uint8Array(12));const encrypted=await crypto.subtle.encrypt({name:'AES-GCM',iv},key,new TextEncoder().encode(JSON.stringify(data)));return {format:'ledger-encrypted-v2',salt:bytes64(salt),iv:bytes64(iv),data:bytes64(encrypted)}; }
+  async function decryptPayload(box, pin) { const salt=from64(box.salt),key=await deriveKey(pin,salt);const plain=await crypto.subtle.decrypt({name:'AES-GCM',iv:from64(box.iv)},key,from64(box.data));return {data:JSON.parse(new TextDecoder().decode(plain)),key,salt}; }
+  function save() { if (!cryptoKey || !vaultSalt) return Promise.resolve(); const snapshot=payload(),key=cryptoKey,salt=vaultSalt; saveQueue=saveQueue.then(async()=>{const box=await encryptPayload(snapshot,key,salt);localStorage.setItem(VAULT_KEY,JSON.stringify(box));if(settings.biometricEnabled)writeBioCache();localStorage.removeItem(KEY);localStorage.removeItem(SETTINGS_KEY);}).catch(()=>toast('Could not save the encrypted ledger'));return saveQueue; }
+  function remaining(e) { if(e.status==='paid')return 0;return Math.max(0,Math.round((+e.amount-(e.payments||[]).reduce((n,p)=>n+(+p.amount||0),0))*100)/100); }
+  function legacySettings(){try{return JSON.parse(localStorage.getItem(SETTINGS_KEY)||'{}')}catch{return{}}}
+  async function loadVault(pin){
+    const box=JSON.parse(localStorage.getItem(VAULT_KEY)||'null');
+    if(box){
+      const result=await decryptPayload(box,pin);
+      cryptoKey=result.key; vaultSalt=result.salt;
+      entries=result.data.entries||[];
+      aliases=result.data.aliases||{};
+      settings=result.data.settings||{};
+    } else {
+      vaultSalt=crypto.getRandomValues(new Uint8Array(16));
+      cryptoKey=await deriveKey(pin,vaultSalt);
+      entries=loadLegacy(); aliases={}; settings=legacySettings();
+      entries=entries.map(e=>({...e,payments:e.payments||[]}));
+      await save();
+    }
+    // If fingerprint cache has newer/more data from a bio-only session, prefer it
+    try {
+      const raw = localStorage.getItem(BIO_CACHE_KEY);
+      if (raw) {
+        const cache = JSON.parse(raw);
+        const cacheCount = Array.isArray(cache.entries) ? cache.entries.length : 0;
+        const vaultCount = entries.length;
+        if (cacheCount > vaultCount || (cacheCount > 0 && cache.ts && (!box || cacheCount >= vaultCount))) {
+          // Use cache when it has data the encrypted vault is missing
+          if (cacheCount >= vaultCount && cacheCount > 0) {
+            entries = cache.entries;
+            aliases = cache.aliases || aliases;
+            settings = { ...settings, ...(cache.settings || {}) };
+          }
+        }
+      }
+    } catch {}
+    const bioOn = !!(settings.biometricEnabled || loadBioMeta().enabled);
+    if (bioOn) writeBioCache();
+    await save(); // sync encrypted vault with current entries while we have the key
+    render();
+    $('lockDialog').close();
+    $('pinInput').value='';
+    $('pinConfirm').value='';
+    toast('Ledger unlocked');
+  }
+  function showPin(mode){lockMode=mode;$('pinError').textContent='';$('pinInput').value='';$('pinConfirm').value='';$('pinConfirmWrap').hidden=mode==='unlock';$('pinInput').minLength=mode==='unlock'?4:4;$('pinInput').maxLength=mode==='unlock'?12:4;if(mode==='unlock')$('pinInput').removeAttribute('pattern');else $('pinInput').pattern='[0-9]{4}';$('lockTitle').textContent=mode==='setup'?'Protect your ledger':mode==='change'?'Change your PIN':'Unlock your ledger';$('lockCopy').textContent=mode==='setup'?'Choose a 4 digit PIN. It encrypts your ledger on this device. Keep it safe: a forgotten PIN cannot be recovered.':mode==='change'?'Choose a new 4 digit PIN. Your encrypted ledger will be re-encrypted with it.':'Enter your PIN to decrypt and open your ledger on this device.';$('pinSubmit').textContent=mode==='setup'?'Create PIN':mode==='change'?'Update PIN':'Unlock';$('lockDialog').showModal();setTimeout(()=>$('pinInput').focus(),100);
+    const bioBtn=$('biometricButton');
+    if(bioBtn){
+      const meta = loadBioMeta();
+      const show = mode==='unlock' && (meta.enabled || settings.biometricEnabled);
+      bioBtn.hidden = !show;
+      if(show) biometricAvailable().then(ok => {
+        bioBtn.hidden = !ok;
+        // Auto-prompt fingerprint as soon as lock screen appears
+        if (ok) setTimeout(() => { unlockWithBiometric(); }, 350);
+      });
+    }
+  }
+  async function initializeVault(){if(!crypto?.subtle){$('lockCopy').textContent='This app needs a secure HTTPS connection to protect your ledger.';return;}showPin(localStorage.getItem(VAULT_KEY)?'unlock':'setup');}
+  function money(n) { return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(Math.abs(n)); }
+  function dateText(d) { if (!d) return ''; return new Intl.DateTimeFormat(undefined, { day: 'numeric', month: 'short', year: 'numeric' }).format(new Date(`${d}T12:00:00`)); }
+  function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+  function toast(message) { const t = $('toast'); t.textContent = message; t.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 2300); }
   function people() {
     const map = new Map();
-    for (const e of entries) {
-      const id = e.personId || `legacy-${e.name.toLowerCase()}`;
-      if (!map.has(id)) {
-        map.set(id, {
-          id,
-          name: e.name,
-          aliases: aliases[id] || [],
-          entries: [],
-          netMinor: 0,
-          toYouMinor: 0,
-          youOweMinor: 0,
-          latest: ''
-        });
-      }
-      const p = map.get(id);
-      p.entries.push(e);
-      const rem = remainingMinor(e);
-      if (e.direction === 'toYou') {
-        p.netMinor += rem;
-        p.toYouMinor += rem;
-      } else {
-        p.netMinor -= rem;
-        p.youOweMinor += rem;
-      }
-      if (e.date > p.latest) p.latest = e.date;
-    }
+    entries.forEach(e => { const id = e.personId || `legacy-${e.name.toLowerCase()}`; if (!map.has(id)) map.set(id, { id, name: e.name, aliases: aliases[id]||[], entries: [], net: 0, toYou: 0, youOwe: 0, latest: '' }); const p = map.get(id); p.entries.push(e); const due=remaining(e); if (e.direction === 'toYou') { p.net += due; p.toYou += due; } else { p.net -= due; p.youOwe += due; } if (e.date > p.latest) p.latest = e.date; });
     return [...map.values()];
   }
-
   function render() {
-    const ps = people();
-    let toYouMinor = 0, youOweMinor = 0, toCount = 0, oweCount = 0;
-
-    for (const p of ps) {
-      toYouMinor += p.toYouMinor;
-      youOweMinor += p.youOweMinor;
-      if (p.toYouMinor > 0) toCount++;
-      if (p.youOweMinor > 0) oweCount++;
-    }
-
-    const netMinor = toYouMinor - youOweMinor;
-    $('owedToYou').textContent = money(toYouMinor);
-    $('youOwe').textContent = money(youOweMinor);
-    $('netBalance').textContent = (netMinor < 0 ? '−' : '') + money(Math.abs(netMinor));
-    $('netCaption').textContent = netMinor === 0 ? 'All settled up' : netMinor > 0 ? 'You are owed more overall' : 'You owe more overall';
-    $('toYouCount').textContent = toCount;
-    $('oweCount').textContent = oweCount;
-    $('allCount').textContent = ps.length;
-
-    renderAnalytics(ps);
-
-    let visible = ps.filter(p => {
-      const matchQuery = !query || (p.name + ' ' + p.entries.map(e => e.note || '').join(' ')).toLowerCase().includes(query);
-      const matchFilter = filter === 'all' || (filter === 'owed' && p.toYouMinor > 0) || (filter === 'owe' && p.youOweMinor > 0);
-      return matchQuery && matchFilter;
-    });
-
-    visible.sort((a, b) => {
-      if (sort === 'name') return a.name.localeCompare(b.name);
-      if (sort === 'amount') return Math.abs(b.netMinor) - Math.abs(a.netMinor);
-      return b.latest.localeCompare(a.latest);
-    });
-
-    const list = $('peopleList');
-    if (!visible.length) {
-      list.innerHTML = `
-        <div class="empty-state">
-          <div class="empty-icon">◈</div>
-          <h3>${ps.length ? 'No matching people found' : 'No transfers yet'}</h3>
-          <p>${ps.length ? 'Try a different search term or change your active filter.' : 'Record a transfer you lent or borrowed to keep clear records.'}</p>
-          ${ps.length ? '' : '<button class="primary-button" id="emptyAddBtn">＋ Add your first transfer</button>'}
-        </div>`;
-      $('emptyAddBtn')?.addEventListener('click', openAdd);
-      return;
-    }
-
-    list.innerHTML = visible.map((p, i) => {
-      const initials = (p.name.trim().split(/\s+/).map(x => x[0]).slice(0, 2).join('') || '?').toUpperCase();
-      const isSettled = p.toYouMinor === 0 && p.youOweMinor === 0;
-      const statusClass = p.netMinor > 0 ? 'positive' : p.netMinor < 0 ? 'negative' : '';
-      const statusLabel = isSettled ? 'Settled' : p.netMinor > 0 ? 'Owes you' : 'You owe';
-      const openCount = p.entries.filter(e => remainingMinor(e) > 0).length;
-
-      return `
-        <article class="person-row" data-person="${esc(p.id)}">
-          <div class="person-ident">
-            <div class="person-avatar c${(i % 4) + 1}">${esc(initials)}</div>
-            <div style="min-width:0">
-              <div class="person-name">${esc(p.name)}</div>
-              <div class="person-meta">${p.entries.length} transfer${p.entries.length === 1 ? '' : 's'}${openCount ? ` · ${openCount} open` : ''} · ${dateText(p.latest)}</div>
-            </div>
-          </div>
-          <div class="amount-block">
-            <div class="money ${statusClass}">${p.netMinor < 0 ? '−' : ''}${money(Math.abs(p.netMinor))}</div>
-            <small>${statusLabel}</small>
-          </div>
-          <span class="row-arrow">›</span>
-        </article>`;
-    }).join('');
-
-    list.querySelectorAll('[data-person]').forEach(row => {
-      row.addEventListener('click', () => openPerson(row.dataset.person));
-    });
+    const ps = people(); let toYou=0, youOwe=0, toCount=0, oweCount=0;
+    ps.forEach(p => { toYou += p.toYou; youOwe += p.youOwe; if (p.toYou > 0) toCount++; if (p.youOwe > 0) oweCount++; });
+    $('owedToYou').textContent=money(toYou); $('youOwe').textContent=money(youOwe); $('netBalance').textContent=(toYou-youOwe < 0 ? '−' : '')+money(toYou-youOwe); $('netCaption').textContent=toYou===youOwe?'All settled up':toYou>youOwe?'You’re owed more overall':'You owe more overall'; $('toYouCount').textContent=toCount; $('oweCount').textContent=oweCount; $('allCount').textContent=ps.length; renderAnalytics(); checkBackupReminder();
+    let visible=ps.filter(p => (!query || (p.name+' '+p.entries.map(e=>e.note||'').join(' ')).toLowerCase().includes(query)) && (filter==='all'||(filter==='owed'&&p.toYou>0)||(filter==='owe'&&p.youOwe>0)));
+    visible.sort((a,b)=>sort==='name'?a.name.localeCompare(b.name):sort==='amount'?Math.abs(b.net)-Math.abs(a.net):b.latest.localeCompare(a.latest));
+    const list=$('peopleList');
+    if(!visible.length){list.innerHTML=`<div class="empty-state"><div class="empty-icon">◈</div><h3>${ps.length?'No matches found':'Start with a transfer'}</h3><p>${ps.length?'Try another name or change the filter.':'Add money you lent or borrowed to see everyone’s balance in one place.'}</p>${ps.length?'':'<button class="primary-button" id="emptyAdd">＋ Add your first transfer</button>'}</div>`; $('emptyAdd')?.addEventListener('click',openAdd); return;}
+    list.innerHTML=visible.map((p,i)=>{const avatar=(p.name.trim().split(/\s+/).map(x=>x[0]).slice(0,2).join('')||'?').toUpperCase();const settled=p.toYou===0&&p.youOwe===0;const cls=p.net>0?'positive':p.net<0?'negative':'';const label=settled?'Settled':p.net>0?'Owes you':p.net<0?'You owe':'Even';const openCount=p.entries.filter(e=>remaining(e)>0).length;return `<article class="person-row" data-person="${esc(p.id)}"><div class="person-ident"><div class="person-avatar c${i%4+1}">${esc(avatar)}</div><div style="min-width:0"><div class="person-name">${esc(p.name)}</div><div class="person-meta">${p.entries.length} transfer${p.entries.length===1?'':'s'}${openCount?` · ${openCount} open`:''} · ${dateText(p.latest)}</div></div></div><div class="amount-block amount-primary"><div class="money ${cls}">${p.net<0?'−':''}${money(Math.abs(p.net))}</div><small>${label}</small></div><span class="row-arrow">›</span></article>`}).join('');
+    list.querySelectorAll('[data-person]').forEach(row=>row.addEventListener('click',()=>openPerson(row.dataset.person)));
   }
-
-  function renderAnalytics(ps) {
-    const el = $('analyticsCard');
-    if (!ps.length) {
-      el.innerHTML = '';
-      return;
-    }
-    const topOwed = [...ps].filter(p => p.toYouMinor > 0).sort((a, b) => b.toYouMinor - a.toYouMinor)[0];
-    const topYouOwe = [...ps].filter(p => p.youOweMinor > 0).sort((a, b) => b.youOweMinor - a.youOweMinor)[0];
-    const oldest = entries.filter(e => remainingMinor(e) > 0).sort((a, b) => a.date.localeCompare(b.date))[0];
-
-    let html = '<div class="analytics-card"><div class="card-label"><span class="label-icon">◇</span> INSIGHTS</div>';
-    if (topOwed) html += `<div class="insight-row">Highest owed to you · <b>${esc(topOwed.name)}</b> (${money(topOwed.toYouMinor)})</div>`;
-    if (topYouOwe) html += `<div class="insight-row">You owe most to · <b>${esc(topYouOwe.name)}</b> (${money(topYouOwe.youOweMinor)})</div>`;
-    if (oldest) html += `<div class="insight-row">Oldest active transfer · <b>${esc(oldest.name)}</b> from ${dateText(oldest.date)}</div>`;
-    html += '</div>';
-    el.innerHTML = html;
-  }
-
-  // ==========================================
-  // Person Detail & Settlement Actions
-  // ==========================================
-  function openPerson(id) {
-    const p = people().find(x => x.id === id);
-    if (!p) return;
-    selectedPersonId = id;
-
-    const netClass = p.netMinor > 0 ? '#3dcea8' : p.netMinor < 0 ? '#ee9289' : 'white';
-    const directionLabel = p.netMinor > 0 ? 'owes you' : p.netMinor < 0 ? 'you owe' : 'settled';
-    const activity = [...p.entries].sort((a, b) => b.date.localeCompare(a.date));
-
-    $('personDetail').innerHTML = `
-      <div class="person-detail-head">
-        <div class="dialog-head">
-          <div><p class="eyebrow">PERSON BALANCE</p><h2>${esc(p.name)}</h2></div>
-          <button type="button" class="close-button" data-close="personDialog" aria-label="Close">×</button>
-        </div>
-        <div class="detail-total" style="color:${netClass}">${p.netMinor < 0 ? '−' : ''}${money(Math.abs(p.netMinor))}</div>
-        <div class="detail-label">${directionLabel} · ${money(Math.abs(p.netMinor))} net</div>
-        <div class="detail-summary">
-          <span>OWED TO YOU<b>${money(p.toYouMinor)}</b></span>
-          <span>YOU OWE<b>${money(p.youOweMinor)}</b></span>
-        </div>
-      </div>
-      <div class="person-detail-body">
-        <div class="detail-actions">
-          <button class="primary-button" id="addForPerson">＋ Add transfer</button>
-          <button class="secondary-button" id="sharePerson">Share statement</button>
-        </div>
-        <div class="detail-actions">
-          <button class="secondary-button" id="settleAllBtn" style="color:var(--green);border-color:var(--green)">Settle all balances</button>
-          <button class="secondary-button" id="manageAliases">Aliases</button>
-          <button class="secondary-button" id="mergePerson">Merge</button>
-        </div>
-        <div class="activity-label">TRANSFER HISTORY (${p.entries.length})</div>
-        ${activity.map(e => {
-          const remMinor = remainingMinor(e);
-          return `
-            <div class="activity-item" data-entry="${esc(e.id)}">
-              <div>
-                <b>${e.direction === 'toYou' ? 'They owe you' : 'You owe them'} · ${money(parseToMinorUnits(e.amount))}</b>
-                <small>
-                  ${remMinor > 0 ? `${money(remMinor)} remaining · ` : e.status === 'paid' ? 'Settled · ' : ''}
-                  ${dateText(e.date)}
-                  ${e.dueDate ? ` · Due ${dateText(e.dueDate)}${e.dueDate < today() && remMinor > 0 ? ' ⚠ Overdue' : ''}` : ''}
-                  ${e.note ? ` · ${esc(e.note)}` : ''}
-                </small>
-                <div class="payment-history">
-                  ${(e.payments || []).map((x, j) => `
-                    <div>
-                      ↳ Repaid ${money(parseToMinorUnits(x.amount))} on ${dateText(x.date)}${x.note ? ` (${esc(x.note)})` : ''}
-                      <button type="button" class="undo-payment" data-entry="${esc(e.id)}" data-index="${j}">Remove</button>
-                    </div>
-                  `).join('')}
-                </div>
-              </div>
-              <div class="activity-tools">
-                ${remMinor > 0 ? `
-                  <button class="status-chip record-repay" data-id="${esc(e.id)}">Record repayment</button>
-                  <button class="status-chip toggle-paid" data-id="${esc(e.id)}">Mark paid</button>
-                ` : `
-                  <button class="status-chip toggle-paid" data-id="${esc(e.id)}">Reopen</button>
-                `}
-              </div>
-            </div>`;
-        }).join('')}
-      </div>`;
-
-    $('personDialog').showModal();
-
-    // Event handlers inside person sheet
-    $('personDetail').querySelector('[data-close]').onclick = () => $('personDialog').close();
-
-    $('addForPerson').onclick = () => {
-      $('personDialog').close();
-      openAdd();
-      $('personName').value = p.name;
-      chosenPerson = p;
-    };
-
-    $('sharePerson').onclick = () => {
-      const summary = generatePersonStatement(p);
-      shareContent(summary, `Balance with ${p.name}`);
-    };
-
-    $('settleAllBtn').onclick = async () => {
-      const openTransfers = p.entries.filter(e => remainingMinor(e) > 0);
-      if (!openTransfers.length) {
-        toast('No open balance to settle');
-        return;
-      }
-      const confirmed = await showConfirmModal(`Settle all with ${p.name}?`, `This will mark all ${openTransfers.length} open transfer(s) as settled.`);
-      if (!confirmed) return;
-
-      const snapshot = openTransfers.map(e => ({ id: e.id, status: e.status }));
-      openTransfers.forEach(e => e.status = 'paid');
-      pushUndo({ type: 'settleAll', entries: snapshot });
-      await save();
-      render();
-      openPerson(id);
-      toast('All balances marked settled', true);
-    };
-
-    $('manageAliases').onclick = () => openAliases(p);
-    $('mergePerson').onclick = () => openMerge(p);
-
-    $('personDetail').querySelectorAll('.record-repay').forEach(btn => {
-      btn.onclick = (e) => {
-        e.stopPropagation();
-        openRepayment(btn.dataset.id);
-      };
-    });
-
-    $('personDetail').querySelectorAll('.toggle-paid').forEach(btn => {
-      btn.onclick = async (e) => {
-        e.stopPropagation();
-        const item = entries.find(x => x.id === btn.dataset.id);
-        if (!item) return;
-        const prevStatus = item.status;
-        item.status = item.status === 'paid' ? 'open' : 'paid';
-        pushUndo({ type: 'toggleStatus', id: item.id, prevStatus });
-        await save();
-        render();
-        openPerson(id);
-        toast(item.status === 'paid' ? 'Transfer settled' : 'Transfer reopened', true);
-      };
-    });
-
-    $('personDetail').querySelectorAll('.undo-payment').forEach(btn => {
-      btn.onclick = async (e) => {
-        e.stopPropagation();
-        const item = entries.find(x => x.id === btn.dataset.entry);
-        if (!item) return;
-        const removed = item.payments.splice(+btn.dataset.index, 1)[0];
-        item.status = 'open';
-        pushUndo({ type: 'addPayment', entryId: item.id, payment: removed });
-        await save();
-        render();
-        openPerson(id);
-        toast('Repayment removed', true);
-      };
-    });
-
-    $('personDetail').querySelectorAll('.activity-item').forEach(el => {
-      el.onclick = (e) => {
-        if (e.target.closest('button')) return;
-        $('personDialog').close();
-        editEntry(el.dataset.entry);
-      };
-    });
-  }
-
-  // ==========================================
-  // Form Operations: Add / Edit Transfer
-  // ==========================================
-  function openAdd() {
-    chosenPerson = null;
-    $('entryForm').reset();
-    $('entryId').value = '';
-    $('transferDate').value = today();
-    $('dueDate').value = '';
-    $('formEyebrow').textContent = 'NEW TRANSFER';
-    $('formTitle').textContent = 'Add a transfer';
-    $('deleteEntry').hidden = true;
-    $('matchHint').hidden = true;
-    $('entryDialog').showModal();
-    setTimeout(() => $('personName').focus(), 100);
-  }
-
-  function editEntry(id) {
-    const e = entries.find(x => x.id === id);
-    if (!e) return;
-    chosenPerson = null;
-    $('entryId').value = e.id;
-    $('personName').value = e.name;
-    $('amount').value = e.amount;
-    $('transferDate').value = e.date;
-    $('dueDate').value = e.dueDate || '';
-    $('note').value = e.note || '';
-    document.querySelector(`input[name="direction"][value="${e.direction}"]`).checked = true;
-    $('formEyebrow').textContent = 'EDIT TRANSFER';
-    $('formTitle').textContent = 'Edit transfer';
-    $('deleteEntry').hidden = false;
-    $('matchHint').hidden = true;
-    $('entryDialog').showModal();
-  }
-
-  $('entryForm').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const id = $('entryId').value;
-    const prior = id ? entries.find(x => x.id === id) : null;
-    const name = $('personName').value.trim();
-    if (!name) return;
-
-    const amountFloat = Number($('amount').value);
-    const amountMinor = parseToMinorUnits(amountFloat);
-
-    if (prior) {
-      const repaidMinor = (prior.payments || []).reduce((acc, p) => acc + parseToMinorUnits(p.amount), 0);
-      if (amountMinor < repaidMinor) {
-        toast('Amount cannot be less than repayments already recorded');
-        return;
-      }
-    }
-
-    const item = {
-      id: id || crypto.randomUUID(),
-      personId: chosenPerson?.id || prior?.personId || crypto.randomUUID(),
-      name: chosenPerson?.name || name,
-      direction: document.querySelector('input[name="direction"]:checked').value,
-      amount: amountFloat,
-      date: $('transferDate').value,
-      dueDate: $('dueDate').value || null,
-      note: $('note').value.trim(),
-      status: prior?.status || 'open',
-      payments: prior?.payments || [],
-      createdAt: prior?.createdAt || new Date().toISOString()
-    };
-
-    if (prior) {
-      const priorClone = JSON.parse(JSON.stringify(prior));
-      entries = entries.map(x => x.id === id ? item : x);
-      pushUndo({ type: 'replaceEntry', entry: priorClone });
-    } else {
-      entries.push(item);
-      pushUndo({ type: 'deleteEntry', id: item.id });
-    }
-
+  function openAdd() { chosenPerson=null;$('entryForm').reset(); $('entryId').value=''; $('personName').value=''; $('amount').value=''; $('transferDate').value=today(); $('dueDate').value=''; $('note').value=''; document.querySelector('input[name="direction"][value="toYou"]').checked=true; $('formEyebrow').textContent='NEW TRANSFER'; $('formTitle').textContent='Add a transfer'; $('deleteEntry').hidden=true; $('matchHint').hidden=true; $('matchHint').innerHTML=''; $('entryDialog').showModal(); setTimeout(()=>$('personName').focus(),100); }
+  function editEntry(id) { const e=entries.find(x=>x.id===id); if(!e)return;chosenPerson=null;$('entryId').value=e.id; $('personName').value=e.name; $('amount').value=e.amount; $('transferDate').value=e.date; $('dueDate').value=e.dueDate||''; $('note').value=e.note||''; document.querySelector(`input[name="direction"][value="${e.direction}"]`).checked=true; $('formEyebrow').textContent='EDIT TRANSFER'; $('formTitle').textContent='Edit transfer'; $('deleteEntry').hidden=false; $('matchHint').hidden=true; $('entryDialog').showModal(); }
+  function normalize(s) { return s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]/g,''); }
+  function similarity(a,b) { a=normalize(a);b=normalize(b);if(!a||!b)return 0;const d=Array.from({length:a.length+1},(_,i)=>[i]);for(let j=1;j<=b.length;j++)d[0][j]=j;for(let i=1;i<=a.length;i++)for(let j=1;j<=b.length;j++)d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+(a[i-1]===b[j-1]?0:1));return 1-d[a.length][b.length]/Math.max(a.length,b.length); }
+  function findMatch(name) { const peopleList=people(); const exact=peopleList.find(p=>[p.name,...p.aliases].some(n=>normalize(n)===normalize(name))); if(exact)return {p:exact,score:1,exact:true};return peopleList.map(p=>({p,score:Math.max(...[p.name,...p.aliases].map(n=>similarity(name,n)))})).filter(x=>x.score>=.70).sort((a,b)=>b.score-a.score)[0]||null; }
+  let chosenPerson=null;
+  $('personName').addEventListener('input', e=>{chosenPerson=null;const hint=$('matchHint'),name=e.target.value.trim(); if(!name){hint.hidden=true;return;}const match=findMatch(name);if(!match){hint.hidden=true;return;}hint.hidden=false;hint.innerHTML=match.exact?`This matches <b>${esc(match.p.name)}</b>. New transfers will be grouped with them.`:`Did you mean <b>${esc(match.p.name)}</b>? <button type="button" id="chooseMatch">Use this person</button><button type="button" class="dismiss-match" id="dismissMatch">Keep as new</button>`; if(match.exact) chosenPerson=match.p; else { $('chooseMatch').onclick=()=>{chosenPerson=match.p;$('personName').value=match.p.name;hint.innerHTML=`Using existing person <b>${esc(match.p.name)}</b>. <button type="button" class="dismiss-match" id="undoMatch">Undo</button>`;$('undoMatch').onclick=()=>{chosenPerson=null;hint.hidden=true;};}; $('dismissMatch').onclick=()=>hint.hidden=true; }});
+  $('entryForm').addEventListener('submit',e=>{e.preventDefault();const id=$('entryId').value;const prior=id?entries.find(x=>x.id===id):null;const name=$('personName').value.trim();if(!name)return;const amount=Math.round(Number($('amount').value)*100)/100;if(prior&&amount+0.001<(prior.payments||[]).reduce((n,p)=>n+(+p.amount||0),0)){toast('Amount cannot be less than repayments already recorded');return;}const nameChanged=prior&&normalize(name)!==normalize(prior.name);const item={id:id||crypto.randomUUID(),personId:chosenPerson?.id||(nameChanged?crypto.randomUUID():(prior?.personId||crypto.randomUUID())),name:chosenPerson?.name||name,direction:document.querySelector('input[name="direction"]:checked').value,amount,date:$('transferDate').value,dueDate:$('dueDate').value||null,note:$('note').value.trim(),status:prior?.status||'open',payments:prior?.payments||[],createdAt:prior?.createdAt||new Date().toISOString()};if(prior)entries=entries.map(x=>x.id===id?item:x);else entries.push(item);void save();$('entryDialog').close();render();toast(prior?'Transfer updated':'Transfer saved');if(selectedPersonId)openPerson(selectedPersonId);});
+  $('deleteEntry').addEventListener('click',()=>{const id=$('entryId').value;if(!id)return;if(confirm('Delete this transfer? This cannot be undone.')){entries=entries.filter(e=>e.id!==id);save();$('entryDialog').close();render();toast('Transfer deleted');if(selectedPersonId)openPerson(selectedPersonId);}});
+  function openPerson(id) { const p=people().find(x=>x.id===id);if(!p)return;selectedPersonId=id;const direction=p.net>0?'owes you':p.net<0?'you owe':'settled';const activity=[...p.entries].sort((a,b)=>b.date.localeCompare(a.date));$('personDetail').innerHTML=`<div class="person-detail-head"><div class="dialog-head"><div><p class="eyebrow">PERSON BALANCE</p><h2>${esc(p.name)}</h2></div><button type="button" class="close-button" data-close="personDialog" aria-label="Close">×</button></div><div class="detail-total" style="color:${p.net>0?'#64cba3':p.net<0?'#ee9289':'white'}">${p.net<0?'−':''}${money(p.net)}</div><div class="detail-label">${direction} · ${money(Math.abs(p.net))} net balance</div><div class="detail-summary"><span>OWED TO YOU<b>${money(p.toYou)}</b></span><span>YOU OWE<b>${money(p.youOwe)}</b></span></div></div><div class="person-detail-body"><div class="detail-actions"><button class="secondary-button" id="sharePerson">Share statement</button><button class="primary-button" id="addForPerson">＋ Add transfer</button></div><div class="detail-actions secondary-actions"><button class="secondary-button" id="settleAllBtn" style="border-color:var(--green);color:var(--green)">Settle all with this person</button></div><div class="detail-actions secondary-actions"><button class="secondary-button" id="manageAliases">Manage aliases</button><button class="secondary-button" id="mergePerson">Merge duplicate</button></div><div class="share-options"><label><input type="checkbox" id="shareSettled" checked /> Include settled</label><label>From <input type="date" id="shareFrom" /></label><label>To <input type="date" id="shareTo" /></label></div><div class="activity-label">TRANSFER HISTORY · ${p.entries.length}</div>${activity.map(e=>{const rem=remaining(e);return `<div class="activity-item" data-entry="${esc(e.id)}"><div><b>${e.direction==='toYou'?'They owe you':'You owe them'} · ${money(e.amount)}</b><small>${rem>0?`${money(rem)} remaining · `:e.status==='paid'?'Settled · ':''}${dateText(e.date)}${e.dueDate?` · Due ${dateText(e.dueDate)}${e.dueDate<today()&&rem>0?' ⚠':''}`:''}${e.note?' · '+esc(e.note):''}</small><div class="payment-history">${(e.payments||[]).map((x,j)=>`<div>Repayment ${money(x.amount)} · ${dateText(x.date)}${x.note?' · '+esc(x.note):''}<button type="button" class="undo-payment" data-entry="${esc(e.id)}" data-index="${j}">Undo</button></div>`).join('')}</div></div><div class="activity-tools">${rem>0?`<button class="status-chip record-repay" data-id="${esc(e.id)}">Record repayment</button><button class="status-chip toggle-paid" data-id="${esc(e.id)}">Settle remainder</button>`:e.status==='paid'?`<button class="status-chip toggle-paid" data-id="${esc(e.id)}">Reopen</button>`:`<span class="status-chip static-chip">Repaid</span>`}<span class="status">Tap transfer to edit</span></div></div>`}).join('')}</div>`;$('personDialog').showModal();$('personDetail').querySelector('[data-close]').onclick=()=>$('personDialog').close();const opts=()=>({includeSettled:$('shareSettled').checked,from:$('shareFrom').value,to:$('shareTo').value});$('sharePerson').onclick=()=>shareSummary(personSummary(p,opts()),p.name);
+$('settleAllBtn')&&($('settleAllBtn').onclick= async ()=>{
+  const openOnes = p.entries.filter(e => remaining(e) > 0);
+  if (!openOnes.length) { toast('Nothing open to settle'); return; }
+  if (!confirm(`Mark all ${openOnes.length} open transfer(s) with ${p.name} as settled?`)) return;
+  const snapshot = openOnes.map(e => ({id:e.id, status:e.status, payments: JSON.parse(JSON.stringify(e.payments||[]))}));
+  openOnes.forEach(e => { e.status = 'paid'; });
+  pushUndo({type:'settleAll', entries: snapshot});
+  await save(); 
+  render(); 
+  openPerson(id); 
+  toast('All settled with ' + p.name);
+});$('addForPerson').onclick=()=>{const person=p;$('personDialog').close();openAdd();$('personName').value=person.name;chosenPerson=person;$('matchHint').hidden=false;$('matchHint').innerHTML=`Using existing person <b>${esc(person.name)}</b>.`;};$('manageAliases').onclick=()=>openAliases(p);$('mergePerson').onclick=()=>openMerge(p);$('personDetail').querySelectorAll('.activity-item').forEach(el=>el.addEventListener('click',ev=>{if(ev.target.closest('button'))return;$('personDialog').close();editEntry(el.dataset.entry);}));$('personDetail').querySelectorAll('.record-repay').forEach(btn=>btn.addEventListener('click',ev=>{ev.stopPropagation();openRepayment(btn.dataset.id);}));$('personDetail').querySelectorAll('.toggle-paid').forEach(btn=>btn.addEventListener('click', async ev=>{
+  ev.stopPropagation();
+  const item=entries.find(x=>x.id===btn.dataset.id);
+  if(item){
+    item.status=item.status==='paid'?'open':'paid';
     await save();
-    $('entryDialog').close();
     render();
-    toast(prior ? 'Transfer updated' : 'Transfer saved', true);
-    if (selectedPersonId) openPerson(selectedPersonId);
-  });
-
-  $('deleteEntry').addEventListener('click', async () => {
-    const id = $('entryId').value;
-    if (!id) return;
-    const item = entries.find(e => e.id === id);
-    if (!item) return;
-
-    const confirmed = await showConfirmModal('Delete transfer?', 'This entry will be permanently removed from your ledger.');
-    if (!confirmed) return;
-
-    entries = entries.filter(e => e.id !== id);
-    pushUndo({ type: 'restoreEntry', entry: item });
-    await save();
-    $('entryDialog').close();
-    render();
-    toast('Transfer deleted', true);
-    if (selectedPersonId) openPerson(selectedPersonId);
-  });
-
-  // Name Matching Helpers
-  function normalize(s) {
-    return s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
+    openPerson(id);
+    toast(item.status==='paid'?'Marked as settled':'Reopened transfer');
   }
-
-  $('personName').addEventListener('input', (e) => {
-    chosenPerson = null;
-    const val = e.target.value.trim();
-    const hint = $('matchHint');
-    if (!val) {
-      hint.hidden = true;
-      return;
-    }
-    const ps = people();
-    const match = ps.find(p => [p.name, ...p.aliases].some(n => normalize(n) === normalize(val)));
-    if (match) {
-      hint.hidden = false;
-      chosenPerson = match;
-      hint.innerHTML = `Grouping under <b>${esc(match.name)}</b>`;
-    } else {
-      hint.hidden = true;
-    }
-  });
-
-  // ==========================================
-  // Repayments
-  // ==========================================
-  function openRepayment(entryId) {
-    const e = entries.find(x => x.id === entryId);
-    if (!e) return;
-    $('personDialog').close();
-    $('repaymentEntryId').value = e.id;
-    $('repayContext').textContent = `${e.name} · ${money(remainingMinor(e))} remaining`;
-    $('repaymentAmount').value = '';
-    $('repaymentDate').value = today();
-    $('repaymentNote').value = '';
-    $('repaymentDialog').showModal();
-  }
-
-  $('repaymentForm').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const item = entries.find(x => x.id === $('repaymentEntryId').value);
-    if (!item) return;
-
-    const amountFloat = Number($('repaymentAmount').value);
-    const amountMinor = parseToMinorUnits(amountFloat);
-    const remMinor = remainingMinor(item);
-
-    if (amountMinor <= 0 || amountMinor > remMinor) {
-      toast('Enter an amount up to the remaining balance');
-      return;
-    }
-
-    item.payments = item.payments || [];
-    const payment = {
-      id: crypto.randomUUID(),
-      amount: amountFloat,
-      date: $('repaymentDate').value,
-      note: $('repaymentNote').value.trim()
-    };
-    item.payments.push(payment);
-    if (remainingMinor(item) === 0) item.status = 'paid';
-
-    pushUndo({ type: 'removePayment', entryId: item.id, paymentId: payment.id });
-    await save();
-    $('repaymentDialog').close();
-    render();
-    openPerson(item.personId);
-    toast('Repayment recorded', true);
-  });
-
-  // ==========================================
-  // Undo Engine
-  // ==========================================
+}));$('personDetail').querySelectorAll('.undo-payment').forEach(btn=>btn.addEventListener('click',ev=>{ev.stopPropagation();const item=entries.find(x=>x.id===btn.dataset.entry);if(item){item.payments.splice(+btn.dataset.index,1);item.status='open';void save();render();openPerson(id);toast('Repayment removed');}})); }
+  function personSummary(p,options={includeSettled:true}){let transfers=p.entries.filter(e=>(!options.from||e.date>=options.from)&&(!options.to||e.date<=options.to)&&(options.includeSettled||remaining(e)>0));const toYou=transfers.filter(e=>e.direction==='toYou').reduce((n,e)=>n+remaining(e),0),youOwe=transfers.filter(e=>e.direction==='youOwe').reduce((n,e)=>n+remaining(e),0),net=toYou-youOwe;const lines=[`Balance with ${p.name}`,`As of ${dateText(today())}`,`You owe me: ${money(toYou)}`,`I owe you: ${money(youOwe)}`,`Net: ${net>0?`You owe me ${money(net)}`:net<0?`I owe you ${money(-net)}`:'settled'}`,options.from||options.to?`Period: ${options.from?dateText(options.from):'Any'} – ${options.to?dateText(options.to):'Today'}`:'',``,`Transfers:`];[...transfers].sort((a,b)=>a.date.localeCompare(b.date)).forEach(e=>{lines.push(`${dateText(e.date)} · ${e.direction==='toYou'?'You owe me':'I owe you'} ${money(e.amount)}${e.note?' · '+e.note:''}`);(e.payments||[]).forEach(x=>lines.push(`  Repayment ${dateText(x.date)} · ${money(x.amount)}${x.note?' · '+x.note:''}`));lines.push(`  Remaining: ${money(remaining(e))}${e.status==='paid'?' · settled':''}`);});return lines.filter(Boolean).join('\n');}
+async function shareSummary(text,name){if(navigator.share){try{await navigator.share({title:`Balance with ${name}`,text});}catch(e){if(e.name!=='AbortError')toast('Could not open the share menu');}}else toast('The share menu is available on Android.');}
+  function openRepayment(id){const e=entries.find(x=>x.id===id);if(!e)return;$('personDialog').close();$('repaymentEntryId').value=e.id;$('repayContext').textContent=`${e.name} · ${money(remaining(e))} remaining`;$('repaymentAmount').value='';$('repaymentAmount').max=remaining(e);$('repaymentDate').value=today();$('repaymentNote').value='';$('repaymentDialog').showModal();}
+  function openAliases(p){$('aliasTitle').textContent=`Names for ${p.name}`;renderAliases(p);$('aliasDialog').showModal();}
+  function renderAliases(p){const vals=aliases[p.id]||[];$('aliasList').innerHTML=vals.length?vals.map((a,i)=>`<div class="alias-item"><span>${esc(a)}</span><button type="button" class="remove-alias" data-index="${i}" aria-label="Remove ${esc(a)}">×</button></div>`).join(''):'<p class="settings-copy tiny">No saved aliases yet.</p>'; $('aliasList').querySelectorAll('.remove-alias').forEach(b=>b.onclick=()=>{aliases[p.id].splice(+b.dataset.index,1);if(!aliases[p.id].length)delete aliases[p.id];void save();renderAliases(p);});}
+  function openMerge(p){const options=people().filter(x=>x.id!==p.id);if(!options.length){toast('There is no other person to merge');return;}$('mergeCopy').textContent=`All transfers and aliases for ${p.name} will be moved into the selected person.`;$('mergeSelect').innerHTML=options.map(x=>`<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('');$('mergeDialog').dataset.source=p.id;$('mergeDialog').showModal();}
+  $('shareAllButton').addEventListener('click',()=>{const ps=people();if(!ps.length){toast('No transfers to share yet');return;}const net=ps.reduce((a,p)=>a+p.net,0);const text=[`Personal ledger overview · ${dateText(today())}`,`Owed to you: ${money(ps.reduce((a,p)=>a+p.toYou,0))}`,`You owe: ${money(ps.reduce((a,p)=>a+p.youOwe,0))}`,`Net: ${net>=0?money(net)+' owed to you':money(net)+' you owe'}`, '',...ps.map(p=>`${p.name}: ${p.net>0?money(p.net)+' owed to you':p.net<0?money(-p.net)+' you owe':'settled'}`)].join('\n');shareSummary(text,'Ledger overview');});
+  document.querySelectorAll('.filter').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('.filter').forEach(x=>x.classList.remove('active'));b.classList.add('active');filter=b.dataset.filter;render();}));
+  $('searchInput').addEventListener('input',e=>{query=e.target.value.toLowerCase().trim();render();});$('sortSelect').addEventListener('change',e=>{sort=e.target.value;render();});
+  ['addButton','fabButton'].forEach(id=>$(id).addEventListener('click',openAdd));document.querySelectorAll('[data-close]').forEach(b=>b.addEventListener('click',()=>$(b.dataset.close).close()));
+  $('settingsButton').addEventListener('click',()=>$('settingsDialog').showModal());$('saveSettings').addEventListener('click',e=>{e.preventDefault();$('settingsDialog').close();});
+  $('lockNowButton').addEventListener('click',async()=>{await saveQueue;$('settingsDialog').close();for(const id of ['personDialog','entryDialog','backupDialog','repaymentDialog','aliasDialog','mergeDialog'])if($(id).open)$(id).close();$('personDetail').innerHTML='';entries=[];aliases={};cryptoKey=null;vaultSalt=null;render();showPin('unlock');});
+  $('changePinButton').addEventListener('click',()=>{$('settingsDialog').close();showPin('change');});
+  $('lockForm').addEventListener('submit',async e=>{e.preventDefault();const pin=$('pinInput').value;if(lockMode==='unlock'?!/^\d{4,12}$/.test(pin):!/^\d{4}$/.test(pin)){$('pinError').textContent=lockMode==='unlock'?'Enter your PIN.':'Enter a 4 digit PIN.';return;}if(lockMode!=='unlock'&&pin!==$('pinConfirm').value){$('pinError').textContent='The PINs do not match.';return;}try{if(lockMode==='change'){await saveQueue;vaultSalt=crypto.getRandomValues(new Uint8Array(16));cryptoKey=await deriveKey(pin,vaultSalt);await save();$('lockDialog').close();toast('PIN changed');}else{await loadVault(pin);if(pin.length!==4)showPin('change');
+      else {
+        $('lockDialog').close();
+        // Offer biometric if available and not yet enabled
+        if (!settings.biometricEnabled) {
+          biometricAvailable().then(ok => {
+            if (ok) {
+              const row = $('biometricRow'); if (row) row.style.display = 'flex';
+            }
+          });
+        }
+      }}}catch{$('pinError').textContent=lockMode==='unlock'?'That PIN could not unlock this ledger. Try again.':'Could not protect the ledger. Please try again.';$('pinInput').value='';$('pinInput').focus();}});
+  $('backupButton').addEventListener('click',()=>$('backupDialog').showModal());
+  $('exportButton').addEventListener('click',async()=>{const a=window.prompt('Enter a 4 digit PIN to encrypt this backup. Use your ledger PIN if you want to restore it easily.');if(!a)return;const b=window.prompt('Enter the same PIN again.');if(a!==b){toast('The PINs did not match');return;}if(!/^\d{4}$/.test(a)){toast('Use a 4 digit PIN');return;}const salt=crypto.getRandomValues(new Uint8Array(16)),key=await deriveKey(a,salt),box=await encryptPayload(payload(),key,salt);download(JSON.stringify(box,null,2),`ledger-backup-${today()}.json`,'application/json');toast('Encrypted backup downloaded');});
+  $('csvButton').addEventListener('click',()=>{const rows=[['Person','Direction','Transfer date','Amount INR','Repaid INR','Remaining INR','Status','Note','Repayment date','Repayment amount INR','Repayment note']];entries.forEach(e=>{const paid=(e.payments||[]).reduce((n,p)=>n+(+p.amount||0),0);if(!(e.payments||[]).length)rows.push([e.name,e.direction==='toYou'?'They owe you':'You owe them',e.date,e.amount,paid,remaining(e),remaining(e)===0?'Settled':'Open',e.note||'','','','']);else (e.payments||[]).forEach((p,i)=>rows.push([e.name,e.direction==='toYou'?'They owe you':'You owe them',e.date,i===0?e.amount:'',i===0?paid:'',i===0?remaining(e):'',i===0?(remaining(e)===0?'Settled':'Open'):'',i===0?(e.note||''):'',p.date,p.amount,p.note||'']));});const csv=rows.map(row=>row.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\r\n');download('\ufeff'+csv,`ledger-${today()}.csv`,'text/csv');toast('CSV exported');});
+  function download(content,name,type){const blob=new Blob([content],{type}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+  $('importFile').addEventListener('change',async e=>{const file=e.target.files[0];if(!file)return;try{let raw=JSON.parse(await file.text()),data;if(raw.format==='ledger-encrypted-v2'){const pin=window.prompt('Enter the PIN used to encrypt this backup.');if(!pin)throw Error('cancel');data=(await decryptPayload(raw,pin)).data;}else{data=raw;if(!Array.isArray(data.entries))throw Error('invalid');}if(!Array.isArray(data.entries)||!data.entries.every(x=>x.id&&x.name&&Number.isFinite(+x.amount)&&['toYou','youOwe'].includes(x.direction)))throw Error('invalid');if(confirm(`Restore ${data.entries.length} transfers? Your current ledger will be replaced.`)){entries=data.entries.map(x=>({...x,payments:x.payments||[]}));aliases=data.aliases||{};settings=data.settings||{};await save();render();toast('Backup restored');$('backupDialog').close();}}catch{toast('Backup could not be restored. Check the file and PIN.');}e.target.value='';});
+  $('repaymentForm').addEventListener('submit',async e=>{e.preventDefault();const item=entries.find(x=>x.id===$('repaymentEntryId').value);if(!item)return;const amount=Math.round(Number($('repaymentAmount').value)*100)/100;if(amount<=0||amount>remaining(item)+.001){toast('Enter an amount up to the remaining balance');return;}item.payments=item.payments||[];item.payments.push({id:crypto.randomUUID(),amount,date:$('repaymentDate').value,note:$('repaymentNote').value.trim()});if(remaining(item)===0)item.status='paid';await save();$('repaymentDialog').close();render();openPerson(item.personId);toast('Repayment saved');});
+  $('addAliasButton').addEventListener('click',()=>{const p=people().find(x=>x.id===selectedPersonId),value=$('aliasInput').value.trim();if(!p||!value)return;const existing=[p.name,...p.aliases].some(a=>normalize(a)===normalize(value));if(existing){toast('That name is already linked');return;}aliases[p.id]=aliases[p.id]||[];aliases[p.id].push(value);$('aliasInput').value='';void save();renderAliases(p);toast('Alias saved');});
+  $('mergeForm').addEventListener('submit',e=>{e.preventDefault();const from=$('mergeDialog').dataset.source,toId=$('mergeSelect').value,to=people().find(x=>x.id===toId),source=people().find(x=>x.id===from);if(!to||!source)return;const movedNames=[source.name,...(aliases[from]||[])];entries.forEach(item=>{if(item.personId===from){item.personId=toId;item.name=to.name;}});aliases[toId]=[...new Set([...(aliases[toId]||[]),...movedNames].filter(n=>normalize(n)!==normalize(to.name)))];delete aliases[from];void save();$('mergeDialog').close();$('personDialog').close();render();toast('People merged');});
+  function armAutoLock(){clearTimeout(lockTimer);lockTimer=setTimeout(()=>{if(document.visibilityState==='hidden'&&cryptoKey){void saveQueue.then(()=>{for(const id of ['personDialog','entryDialog','backupDialog','repaymentDialog','aliasDialog','mergeDialog'])if($(id).open)$(id).close();$('personDetail').innerHTML='';entries=[];aliases={};cryptoKey=null;vaultSalt=null;render();showPin('unlock');});}},120000);}document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')armAutoLock();else clearTimeout(lockTimer);});
+  document.addEventListener('contextmenu',e=>{if(!e.target.closest('input,textarea,select'))e.preventDefault();});
+  $('todayLabel').textContent=new Intl.DateTimeFormat(undefined,{weekday:'long',month:'long',day:'numeric'}).format(new Date()).toUpperCase();
+  
   function pushUndo(action) {
     undoStack.push(action);
-    if (undoStack.length > 20) undoStack.shift();
+    if (undoStack.length > 15) undoStack.shift();
   }
-
-  async function performUndo() {
-    if (!undoStack.length) {
-      toast('Nothing to undo');
-      return;
-    }
+  function performUndo() {
+    if (!undoStack.length) { toast('Nothing to undo'); return; }
     const action = undoStack.pop();
-    switch (action.type) {
-      case 'settleAll':
-        for (const snap of action.entries) {
-          const item = entries.find(x => x.id === snap.id);
-          if (item) item.status = snap.status;
-        }
-        break;
-      case 'toggleStatus': {
-        const item = entries.find(x => x.id === action.id);
-        if (item) item.status = action.prevStatus;
-        break;
-      }
-      case 'restoreEntry':
-        entries.push(action.entry);
-        break;
-      case 'deleteEntry':
-        entries = entries.filter(x => x.id !== action.id);
-        break;
-      case 'replaceEntry':
-        entries = entries.map(x => x.id === action.entry.id ? action.entry : x);
-        break;
-      case 'removePayment': {
-        const item = entries.find(x => x.id === action.entryId);
-        if (item) {
-          item.payments = (item.payments || []).filter(p => p.id !== action.paymentId);
-          item.status = 'open';
-        }
-        break;
-      }
-      case 'addPayment': {
-        const item = entries.find(x => x.id === action.entryId);
-        if (item) item.payments.push(action.payment);
-        break;
-      }
-    }
-    await save();
-    render();
-    if (selectedPersonId) openPerson(selectedPersonId);
-    toast('Action undone');
-  }
-
-  // ==========================================
-  // Aliases & Merge
-  // ==========================================
-  function openAliases(p) {
-    $('aliasTitle').textContent = `Aliases for ${p.name}`;
-    renderAliases(p);
-    $('aliasDialog').showModal();
-  }
-
-  function renderAliases(p) {
-    const list = aliases[p.id] || [];
-    $('aliasList').innerHTML = list.length
-      ? list.map((a, i) => `
-        <div class="alias-item">
-          <span>${esc(a)}</span>
-          <button type="button" class="undo-payment" data-index="${i}">×</button>
-        </div>
-      `).join('')
-      : '<p class="settings-copy tiny">No alternate names recorded.</p>';
-
-    $('aliasList').querySelectorAll('button').forEach(btn => {
-      btn.onclick = async () => {
-        aliases[p.id].splice(+btn.dataset.index, 1);
-        if (!aliases[p.id].length) delete aliases[p.id];
-        await save();
-        renderAliases(p);
-      };
-    });
-  }
-
-  $('addAliasButton').onclick = async () => {
-    const p = people().find(x => x.id === selectedPersonId);
-    const val = $('aliasInput').value.trim();
-    if (!p || !val) return;
-    aliases[p.id] = aliases[p.id] || [];
-    aliases[p.id].push(val);
-    $('aliasInput').value = '';
-    await save();
-    renderAliases(p);
-  };
-
-  function openMerge(p) {
-    const others = people().filter(x => x.id !== p.id);
-    if (!others.length) {
-      toast('No other people to merge with');
-      return;
-    }
-    $('mergeCopy').textContent = `Move all records of ${p.name} into another person.`;
-    $('mergeSelect').innerHTML = others.map(x => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('');
-    $('mergeDialog').dataset.source = p.id;
-    $('mergeDialog').showModal();
-  }
-
-  $('mergeForm').onsubmit = async (e) => {
-    e.preventDefault();
-    const fromId = $('mergeDialog').dataset.source;
-    const toId = $('mergeSelect').value;
-    const target = people().find(x => x.id === toId);
-    const source = people().find(x => x.id === fromId);
-    if (!target || !source) return;
-
-    for (const item of entries) {
-      if (item.personId === fromId) {
-        item.personId = toId;
-        item.name = target.name;
-      }
-    }
-    aliases[toId] = [...new Set([...(aliases[toId] || []), source.name, ...(aliases[fromId] || [])])];
-    delete aliases[fromId];
-
-    await save();
-    $('mergeDialog').close();
-    $('personDialog').close();
-    render();
-    toast('People merged');
-  };
-
-  // ==========================================
-  // Statements & Sharing
-  // ==========================================
-  function generatePersonStatement(p) {
-    const lines = [
-      `Statement with ${p.name}`,
-      `Date: ${dateText(today())}`,
-      `You owe me: ${money(p.toYouMinor)}`,
-      `I owe you: ${money(p.youOweMinor)}`,
-      `Net balance: ${p.netMinor > 0 ? `You owe me ${money(p.netMinor)}` : p.netMinor < 0 ? `I owe you ${money(Math.abs(p.netMinor))}` : 'Settled'}`,
-      '',
-      'Transfers:'
-    ];
-
-    for (const e of p.entries) {
-      const rem = remainingMinor(e);
-      lines.push(`• ${dateText(e.date)}: ${e.direction === 'toYou' ? 'Lent' : 'Borrowed'} ${money(parseToMinorUnits(e.amount))}${e.note ? ` (${e.note})` : ''} — Remaining: ${money(rem)}`);
-    }
-
-    return lines.join('\n');
-  }
-
-  async function shareContent(text, title) {
-    if (navigator.share) {
-      try {
-        await navigator.share({ title, text });
-      } catch (err) {
-        if (err.name !== 'AbortError') copyToClipboard(text);
-      }
-    } else {
-      copyToClipboard(text);
+    if (action.type === 'settleAll') {
+      action.entries.forEach(e => {
+        const item = entries.find(x => x.id === e.id);
+        if (item) { item.status = e.status; item.payments = e.payments; }
+      });
+      void save(); render(); if (selectedPersonId) openPerson(selectedPersonId);
+      toast('Undid settle all');
+    } else if (action.type === 'delete') {
+      entries.push(action.entry);
+      void save(); render();
+      toast('Undid delete');
+    } else if (action.type === 'settle') {
+      const item = entries.find(x => x.id === action.id);
+      if (item) { item.status = action.prevStatus; item.payments = action.prevPayments; void save(); render(); if (selectedPersonId) openPerson(selectedPersonId); }
+      toast('Undid settle');
     }
   }
 
-  function copyToClipboard(str) {
-    navigator.clipboard?.writeText(str).then(() => toast('Statement copied to clipboard'));
-  }
-
-  // ==========================================
-  // Modal Confirm & PIN Helpers
-  // ==========================================
-  function showConfirmModal(title, text) {
-    return new Promise((resolve) => {
-      $('confirmTitle').textContent = title;
-      $('confirmCopy').textContent = text;
-      pendingConfirmResolve = resolve;
-      $('confirmDialog').showModal();
-    });
-  }
-
-  $('confirmYes').onclick = () => {
-    $('confirmDialog').close();
-    if (pendingConfirmResolve) pendingConfirmResolve(true);
-  };
-  $('confirmNo').onclick = () => {
-    $('confirmDialog').close();
-    if (pendingConfirmResolve) pendingConfirmResolve(false);
-  };
-
-  function requestBackupPin(title, copy) {
-    return new Promise((resolve) => {
-      $('backupPinTitle').textContent = title;
-      $('backupPinCopy').textContent = copy;
-      $('backupPinInput').value = '';
-      $('backupPinError').textContent = '';
-      pendingBackupPinResolve = resolve;
-      $('backupPinDialog').showModal();
-      setTimeout(() => $('backupPinInput').focus(), 100);
-    });
-  }
-
-  $('backupPinForm').onsubmit = (e) => {
-    e.preventDefault();
-    const pin = $('backupPinInput').value;
-    if (!/^\d{4,6}$/.test(pin)) {
-      $('backupPinError').textContent = 'Enter a 4 to 6 digit PIN.';
-      return;
-    }
-    $('backupPinDialog').close();
-    if (pendingBackupPinResolve) pendingBackupPinResolve(pin);
-  };
-
-  // ==========================================
-  // Backup & CSV Export / Import
-  // ==========================================
-  $('exportButton').onclick = async () => {
-    const pin = await requestBackupPin('Set Backup PIN', 'Enter a 4 to 6 digit PIN to encrypt this backup.');
-    if (!pin) return;
-    const salt = crypto.getRandomValues(new Uint8Array(16));
-    const key = await deriveKeyFromPin(pin, salt);
-    const box = await encryptPayload({ entries, aliases, settings }, key, salt);
-    downloadFile(JSON.stringify(box, null, 2), `ledger-backup-${today()}.json`, 'application/json');
-    toast('Encrypted backup downloaded');
-  };
-
-  $('csvButton').onclick = () => {
-    const rows = [['Person', 'Direction', 'Transfer Date', 'Amount', 'Remaining', 'Status', 'Note', 'Repayments']];
-    for (const e of entries) {
-      const repays = (e.payments || []).map(p => `${p.date}: ${p.amount}${p.note ? ` (${p.note})` : ''}`).join('; ');
-      rows.push([
-        e.name,
-        e.direction === 'toYou' ? 'They owe you' : 'You owe them',
-        e.date,
-        e.amount,
-        remainingMinor(e) / 100,
-        e.status,
-        e.note || '',
-        repays
-      ]);
-    }
-    const csv = rows.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\r\n');
-    downloadFile('\ufeff' + csv, `ledger-${today()}.csv`, 'text/csv');
-    toast('CSV downloaded');
-  };
-
-  function downloadFile(content, name, type) {
-    const blob = new Blob([content], { type });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = name;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
-
-  $('importFile').onchange = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    try {
-      const text = await file.text();
-      const raw = JSON.parse(text);
-      let payloadData;
-      if (raw.format === 'ledger-encrypted-v2') {
-        const pin = await requestBackupPin('Enter Backup PIN', 'Enter the PIN used to encrypt this file.');
-        if (!pin) return;
-        const salt = from64(raw.salt);
-        const key = await deriveKeyFromPin(pin, salt);
-        payloadData = await decryptPayload(raw, key);
-      } else {
-        payloadData = raw;
-      }
-
-      if (!Array.isArray(payloadData.entries)) throw new Error('Invalid vault structure');
-      const confirmed = await showConfirmModal('Restore backup?', `This will replace your current ${entries.length} transfer(s) with ${payloadData.entries.length} transfer(s) from the backup.`);
-      if (!confirmed) return;
-
-      entries = payloadData.entries;
-      aliases = payloadData.aliases || {};
-      settings = { ...settings, ...(payloadData.settings || {}) };
-      await save();
-      render();
-      toast('Backup restored');
-      $('backupDialog').close();
-    } catch {
-      toast('Could not decrypt or read backup file');
-    }
-    e.target.value = '';
-  };
-
-  // ==========================================
-  // Lock Form Submissions
-  // ==========================================
-  $('lockForm').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const pin = $('pinInput').value;
-    if (!/^\d{4,6}$/.test(pin)) {
-      $('pinError').textContent = 'Enter a 4 to 6 digit PIN.';
-      return;
-    }
-    if (lockMode !== 'unlock' && pin !== $('pinConfirm').value) {
-      $('pinError').textContent = 'PINs do not match.';
-      return;
-    }
-
-    try {
-      if (lockMode === 'change') {
-        vaultSalt = crypto.getRandomValues(new Uint8Array(16));
-        cryptoKey = await deriveKeyFromPin(pin, vaultSalt);
-        await save();
-        $('lockDialog').close();
-        toast('PIN updated');
-      } else {
-        await loadVault(pin);
-      }
-    } catch {
-      $('pinError').textContent = lockMode === 'unlock' ? 'Incorrect PIN.' : 'Error securing vault.';
-      $('pinInput').value = '';
-      $('pinInput').focus();
-    }
-  });
-
-  // ==========================================
-  // Mobile Background Auto-Lock Watcher
-  // ==========================================
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') {
-      backgroundTimestamp = Date.now();
-    } else if (document.visibilityState === 'visible' && backgroundTimestamp) {
-      const elapsed = Date.now() - backgroundTimestamp;
-      if (elapsed >= AUTO_LOCK_MS && cryptoKey) {
-        lockLedger();
-      }
-      backgroundTimestamp = null;
-    }
-  });
-
-  // ==========================================
-  // Backdrop Dismissal for All Native Dialogs
-  // ==========================================
-  document.querySelectorAll('dialog').forEach(dialog => {
-    dialog.addEventListener('click', (e) => {
-      // Do not dismiss non-cancelable unlock dialog on outside tap
-      if (dialog.id === 'lockDialog' && !cryptoKey) return;
-      const rect = dialog.getBoundingClientRect();
-      const clickedInside = (
-        rect.top <= e.clientY && e.clientY <= rect.top + rect.height &&
-        rect.left <= e.clientX && e.clientX <= rect.left + rect.width
-      );
-      if (!clickedInside) dialog.close();
-    });
-  });
-
-  // ==========================================
-  // Event Bindings & Init
-  // ==========================================
-  $('biometricButton').onclick = () => unlockWithBiometric();
-  $('enableBiometric').onclick = async () => {
-    if (!cryptoKey) {
-      toast('Unlock vault first to configure biometrics');
-      return;
-    }
-    const ok = await registerBiometricKey(cryptoKey);
-    if (ok) {
-      toast('Hardware biometrics enabled');
-      $('biometricRow').style.display = 'none';
-    }
-  };
-
-  $('currencySelect').value = settings.currency || 'INR';
-  $('currencySelect').onchange = (e) => {
-    settings.currency = e.target.value;
-    persistSettings();
-    applyTheme();
-    render();
-  };
-
-  document.querySelectorAll('.theme-chip').forEach(chip => {
-    chip.onclick = () => {
-      settings.theme = chip.dataset.theme;
-      persistSettings();
-      applyTheme();
-      document.querySelectorAll('.theme-chip').forEach(c => c.classList.toggle('active', c.dataset.theme === settings.theme));
-    };
-  });
-
-  $('settingsButton').onclick = () => {
-    document.querySelectorAll('.theme-chip').forEach(c => c.classList.toggle('active', c.dataset.theme === (settings.theme || 'system')));
-    if (isPrfSupported() && !localStorage.getItem(BIO_META_KEY)) {
-      $('biometricRow').style.display = 'flex';
-    }
-    $('settingsDialog').showModal();
-  };
-
-  $('saveSettings').onclick = () => $('settingsDialog').close();
-  $('lockNowButton').onclick = () => lockLedger();
-  $('changePinButton').onclick = () => {
-    $('settingsDialog').close();
-    showPinDialog('change');
-  };
-  $('undoButton').onclick = () => {
-    performUndo();
-    $('settingsDialog').close();
-  };
-
-  $('toastUndo').onclick = () => performUndo();
-
-  function toast(msg, showUndo = false) {
-    $('toastText').textContent = msg;
-    $('toastUndo').hidden = !showUndo;
-    const t = $('toast');
-    t.classList.add('show');
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => t.classList.remove('show'), showUndo ? 3500 : 2500);
-  }
-
-  $('searchInput').oninput = (e) => {
-    query = e.target.value.toLowerCase().trim();
-    render();
-  };
-
-  $('sortSelect').onchange = (e) => {
-    sort = e.target.value;
-    render();
-  };
-
-  document.querySelectorAll('.filter').forEach(btn => {
-    btn.onclick = () => {
-      document.querySelectorAll('.filter').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      filter = btn.dataset.filter;
-      render();
-    };
-  });
-
-  ['addButton', 'fabButton'].forEach(id => $(id)?.addEventListener('click', openAdd));
-  document.querySelectorAll('[data-close]').forEach(b => b.addEventListener('click', () => $(b.dataset.close).close()));
-  $('clearDueDate').onclick = () => $('dueDate').value = '';
-  $('backupButton').onclick = () => $('backupDialog').showModal();
-  $('shareAllButton').onclick = () => {
+  
+  function renderAnalytics() {
     const ps = people();
-    const text = ps.map(p => `${p.name}: ${p.netMinor > 0 ? `Owes ${money(p.netMinor)}` : p.netMinor < 0 ? `You owe ${money(Math.abs(p.netMinor))}` : 'Settled'}`).join('\n');
-    shareContent(`Ledger Overview (${dateText(today())})\n\n${text}`, 'Ledger Overview');
-  };
-
-  // Init
-  $('todayLabel').textContent = new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'short', day: 'numeric' }).format(new Date()).toUpperCase();
-  applyTheme();
-
-  // Determine setup vs unlock
-  (async () => {
-    const rawBox = await idbGet(VAULT_RECORD_KEY);
-    showPinDialog(rawBox ? 'unlock' : 'setup');
-  })();
-
-  if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
+    if (!ps.length) {
+      const el = $('analyticsCard');
+      if (el) el.innerHTML = '';
+      return;
+    }
+    const topOwed = [...ps].filter(p => p.toYou > 0).sort((a,b) => b.toYou - a.toYou)[0];
+    const topYouOwe = [...ps].filter(p => p.youOwe > 0).sort((a,b) => b.youOwe - a.youOwe)[0];
+    const oldest = entries.filter(e => remaining(e) > 0).sort((a,b) => a.date.localeCompare(b.date))[0];
+    let html = '<div class="analytics-card"><div class="card-label"><span class="label-icon">◇</span> INSIGHTS</div>';
+    if (topOwed) html += `<div class="insight-row">Highest owed to you · <b>${esc(topOwed.name)}</b> ${money(topOwed.toYou)}</div>`;
+    if (topYouOwe) html += `<div class="insight-row">You owe most to · <b>${esc(topYouOwe.name)}</b> ${money(topYouOwe.youOwe)}</div>`;
+    if (oldest) html += `<div class="insight-row">Oldest open · ${dateText(oldest.date)} · ${esc(oldest.name)}</div>`;
+    html += '</div>';
+    const el = $('analyticsCard');
+    if (el) el.innerHTML = html;
   }
+
+  
+  // Theme chips
+  document.querySelectorAll('.theme-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      const t = chip.dataset.theme;
+      settings.theme = t;
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+      applyTheme();
+      document.querySelectorAll('.theme-chip').forEach(c => c.classList.toggle('active', c.dataset.theme === t));
+      toast('Theme updated');
+    });
+  });
+  // Highlight current theme when settings open
+  $('settingsButton').addEventListener('click', () => {
+    const t = settings.theme || 'system';
+    document.querySelectorAll('.theme-chip').forEach(c => c.classList.toggle('active', c.dataset.theme === t));
+  });
+  // Undo button
+  const undoBtn = $('undoButton');
+  if (undoBtn) undoBtn.addEventListener('click', () => { performUndo(); $('settingsDialog').close(); });
+
+  
+  function checkBackupReminder() {
+    const last = settings.lastBackup || 0;
+    const now = Date.now();
+    const days = (now - last) / (1000*60*60*24);
+    if (days > 14 && entries.length > 0) {
+      setTimeout(() => {
+        if (confirm('It has been a while since your last backup. Would you like to create an encrypted backup now?')) {
+          $('backupButton').click();
+        }
+        settings.lastBackup = now; // soft update so it does not nag every launch
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+      }, 1800);
+    }
+  }
+
+  
+  
+  
+  const BIO_CACHE_KEY = 'ledger.bio.cache.v1';
+  const BIO_META_KEY = 'ledger.bio.meta.v1';
+
+  function loadBioMeta() {
+    try { return JSON.parse(localStorage.getItem(BIO_META_KEY) || '{}'); } catch { return {}; }
+  }
+  function saveBioMeta(meta) {
+    localStorage.setItem(BIO_META_KEY, JSON.stringify(meta));
+    settings.biometricEnabled = !!meta.enabled;
+    settings.biometricCredId = meta.credId || null;
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  }
+
+  async function biometricAvailable() {
+    try {
+      return !!(window.PublicKeyCredential && await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable());
+    } catch { return false; }
+  }
+  function bufferToBase64(buf) {
+    const bytes = new Uint8Array(buf);
+    let s = '';
+    for (const b of bytes) s += String.fromCharCode(b);
+    return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+  }
+  function base64ToBuffer(str) {
+    const pad = '='.repeat((4 - str.length % 4) % 4);
+    const b64 = (str + pad).replace(/-/g,'+').replace(/_/g,'/');
+    const raw = atob(b64);
+    const buf = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i);
+    return buf.buffer;
+  }
+  function writeBioCache() {
+    try {
+      localStorage.setItem(BIO_CACHE_KEY, JSON.stringify({ entries, aliases, settings, ts: Date.now() }));
+    } catch {}
+  }
+  function loadBioCache() {
+    try {
+      const raw = localStorage.getItem(BIO_CACHE_KEY);
+      if (!raw) return false;
+      const data = JSON.parse(raw);
+      if (!Array.isArray(data.entries)) return false;
+      entries = data.entries;
+      aliases = data.aliases || {};
+      settings = { ...settings, ...(data.settings || {}) };
+      return true;
+    } catch { return false; }
+  }
+  async function registerBiometric() {
+    if (!await biometricAvailable()) { toast('Biometric not available on this device'); return false; }
+    try {
+      const challenge = crypto.getRandomValues(new Uint8Array(32));
+      const userId = crypto.getRandomValues(new Uint8Array(16));
+      const rpId = location.hostname;
+      const cred = await navigator.credentials.create({
+        publicKey: {
+          challenge,
+          rp: { name: 'Ledger', id: rpId },
+          user: {
+            id: userId,
+            name: 'ledger@' + rpId,
+            displayName: 'Ledger'
+          },
+          pubKeyCredParams: [
+            { type: 'public-key', alg: -7 },
+            { type: 'public-key', alg: -257 }
+          ],
+          authenticatorSelection: {
+            authenticatorAttachment: 'platform',
+            userVerification: 'required',
+            residentKey: 'required',
+            requireResidentKey: true
+          },
+          timeout: 90000
+        }
+      });
+      if (!cred || !cred.rawId) return false;
+      const credId = bufferToBase64(cred.rawId);
+      saveBioMeta({ enabled: true, credId, rpId });
+      writeBioCache();
+      return true;
+    } catch (e) {
+      console.warn('registerBiometric', e);
+      if (e.name === 'NotAllowedError') toast('Fingerprint setup cancelled');
+      else if (e.name === 'InvalidStateError') {
+        // Credential may already exist – mark enabled and rely on discoverable get
+        saveBioMeta({ enabled: true, credId: loadBioMeta().credId || null, rpId: location.hostname });
+        writeBioCache();
+        return true;
+      } else toast('Could not set up fingerprint: ' + (e.name || 'error'));
+      return false;
+    }
+  }
+  async function tryBiometric() {
+    const meta = loadBioMeta();
+    if (!meta.enabled && !settings.biometricEnabled) return false;
+    if (!await biometricAvailable()) return false;
+    try {
+      const challenge = crypto.getRandomValues(new Uint8Array(32));
+      const rpId = meta.rpId || location.hostname;
+      const opts = {
+        challenge,
+        timeout: 90000,
+        userVerification: 'required',
+        rpId
+      };
+      if (meta.credId) {
+        opts.allowCredentials = [{
+          type: 'public-key',
+          id: base64ToBuffer(meta.credId),
+          transports: ['internal']
+        }];
+      }
+      let cred = null;
+      try {
+        cred = await navigator.credentials.get({ publicKey: opts });
+      } catch (e1) {
+        // Retry without allowCredentials (discoverable / passkey list)
+        if (meta.credId) {
+          delete opts.allowCredentials;
+          cred = await navigator.credentials.get({ publicKey: opts });
+        } else {
+          throw e1;
+        }
+      }
+      return !!cred;
+    } catch (e) {
+      console.warn('tryBiometric', e);
+      return false;
+    }
+  }
+  async function unlockWithBiometric() {
+    const ok = await tryBiometric();
+    if (!ok) return false;
+    if (loadBioCache()) {
+      render();
+      $('lockDialog').close();
+      toast('Unlocked');
+      return true;
+    }
+    // Cache missing – need one PIN unlock to seed it
+    return false;
+  }
+  async function enableBiometricFlow() {
+    if (!await biometricAvailable()) { toast('Biometric not available'); return; }
+    // Must have data in memory to seed cache
+    if (!entries) entries = [];
+    writeBioCache();
+    const ok = await registerBiometric();
+    if (ok) {
+      writeBioCache();
+      if (cryptoKey) void save();
+      toast('Fingerprint unlock ready');
+      const row = $('biometricRow'); if (row) row.style.display = 'none';
+      const btn = $('enableBiometric'); if (btn) { btn.textContent = 'Enabled'; btn.disabled = true; }
+    }
+  }
+
+const bioBtn = $('biometricButton');
+  if (bioBtn) bioBtn.addEventListener('click', async () => {
+    const ok = await unlockWithBiometric();
+    if (!ok) $('pinInput').focus();
+  });
+  const enableBio = $('enableBiometric');
+  if (enableBio) enableBio.addEventListener('click', () => enableBiometricFlow());
+  // Show biometric row in settings when available and not enabled
+  $('settingsButton').addEventListener('click', () => {
+    const row = $('biometricRow');
+    if (row) {
+      biometricAvailable().then(ok => {
+        row.style.display = (ok && !settings.biometricEnabled) ? 'flex' : 'none';
+      });
+    }
+  });
+
+  
+  const clearDue = $('clearDueDate');
+  if (clearDue) clearDue.addEventListener('click', () => { $('dueDate').value = ''; });
+
+  
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+    if ((settings.theme || 'system') === 'system') applyTheme();
+  });
+
+  void initializeVault();
+  if('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(()=>{});
 })();
+
+
