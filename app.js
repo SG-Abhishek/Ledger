@@ -26,7 +26,47 @@
   function save() { if (!cryptoKey || !vaultSalt) return Promise.resolve(); const snapshot=payload(),key=cryptoKey,salt=vaultSalt; saveQueue=saveQueue.then(async()=>{const box=await encryptPayload(snapshot,key,salt);localStorage.setItem(VAULT_KEY,JSON.stringify(box));if(settings.biometricEnabled)writeBioCache();localStorage.removeItem(KEY);localStorage.removeItem(SETTINGS_KEY);}).catch(()=>toast('Could not save the encrypted ledger'));return saveQueue; }
   function remaining(e) { if(e.status==='paid')return 0;return Math.max(0,Math.round((+e.amount-(e.payments||[]).reduce((n,p)=>n+(+p.amount||0),0))*100)/100); }
   function legacySettings(){try{return JSON.parse(localStorage.getItem(SETTINGS_KEY)||'{}')}catch{return{}}}
-  async function loadVault(pin){const box=JSON.parse(localStorage.getItem(VAULT_KEY)||'null');if(box){const result=await decryptPayload(box,pin);cryptoKey=result.key;vaultSalt=result.salt;entries=result.data.entries||[];aliases=result.data.aliases||{};settings=result.data.settings||{};}else{vaultSalt=crypto.getRandomValues(new Uint8Array(16));cryptoKey=await deriveKey(pin,vaultSalt);entries=loadLegacy();aliases={};settings=legacySettings();entries=entries.map(e=>({...e,payments:e.payments||[]}));await save();}render();$('lockDialog').close();if(settings.biometricEnabled)writeBioCache();$('pinInput').value='';$('pinConfirm').value='';toast('Ledger unlocked');}
+  async function loadVault(pin){
+    const box=JSON.parse(localStorage.getItem(VAULT_KEY)||'null');
+    if(box){
+      const result=await decryptPayload(box,pin);
+      cryptoKey=result.key; vaultSalt=result.salt;
+      entries=result.data.entries||[];
+      aliases=result.data.aliases||{};
+      settings=result.data.settings||{};
+    } else {
+      vaultSalt=crypto.getRandomValues(new Uint8Array(16));
+      cryptoKey=await deriveKey(pin,vaultSalt);
+      entries=loadLegacy(); aliases={}; settings=legacySettings();
+      entries=entries.map(e=>({...e,payments:e.payments||[]}));
+      await save();
+    }
+    // If fingerprint cache has newer/more data from a bio-only session, prefer it
+    try {
+      const raw = localStorage.getItem(BIO_CACHE_KEY);
+      if (raw) {
+        const cache = JSON.parse(raw);
+        const cacheCount = Array.isArray(cache.entries) ? cache.entries.length : 0;
+        const vaultCount = entries.length;
+        if (cacheCount > vaultCount || (cacheCount > 0 && cache.ts && (!box || cacheCount >= vaultCount))) {
+          // Use cache when it has data the encrypted vault is missing
+          if (cacheCount >= vaultCount && cacheCount > 0) {
+            entries = cache.entries;
+            aliases = cache.aliases || aliases;
+            settings = { ...settings, ...(cache.settings || {}) };
+          }
+        }
+      }
+    } catch {}
+    const bioOn = !!(settings.biometricEnabled || loadBioMeta().enabled);
+    if (bioOn) writeBioCache();
+    await save(); // sync encrypted vault with current entries while we have the key
+    render();
+    $('lockDialog').close();
+    $('pinInput').value='';
+    $('pinConfirm').value='';
+    toast('Ledger unlocked');
+  }
   function showPin(mode){lockMode=mode;$('pinError').textContent='';$('pinInput').value='';$('pinConfirm').value='';$('pinConfirmWrap').hidden=mode==='unlock';$('pinInput').minLength=mode==='unlock'?4:4;$('pinInput').maxLength=mode==='unlock'?12:4;if(mode==='unlock')$('pinInput').removeAttribute('pattern');else $('pinInput').pattern='[0-9]{4}';$('lockTitle').textContent=mode==='setup'?'Protect your ledger':mode==='change'?'Change your PIN':'Unlock your ledger';$('lockCopy').textContent=mode==='setup'?'Choose a 4 digit PIN. It encrypts your ledger on this device. Keep it safe: a forgotten PIN cannot be recovered.':mode==='change'?'Choose a new 4 digit PIN. Your encrypted ledger will be re-encrypted with it.':'Enter your PIN to decrypt and open your ledger on this device.';$('pinSubmit').textContent=mode==='setup'?'Create PIN':mode==='change'?'Update PIN':'Unlock';$('lockDialog').showModal();setTimeout(()=>$('pinInput').focus(),100);
     const bioBtn=$('biometricButton');
     if(bioBtn){
